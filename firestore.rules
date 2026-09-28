@@ -1,0 +1,195 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc() {
+      return get(
+        /databases/$(database)/documents/users/$(request.auth.uid)
+      );
+    }
+
+    function hasProfile() {
+      return signedIn()
+        && exists(
+          /databases/$(database)/documents/users/$(request.auth.uid)
+        );
+    }
+
+    function isAdmin() {
+      return hasProfile() && userDoc().data.role == 'admin';
+    }
+
+    function isDeveloper() {
+      return hasProfile() && userDoc().data.role == 'developer';
+    }
+
+    function isTester() {
+      return hasProfile() && userDoc().data.role == 'tester';
+    }
+
+    function isStaff() {
+      return isAdmin() || isDeveloper() || isTester();
+    }
+
+    // ------------------------------------------------------------
+    // USERS
+    // ------------------------------------------------------------
+
+    match /users/{userId} {
+
+      // A newly registered user can create their own profile,
+      // but can NEVER register themselves as admin.
+      allow create: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.role in ['developer', 'tester'];
+
+      // Users can read their own profile.
+      // Admins can read all profiles.
+      allow read: if signedIn()
+        && (request.auth.uid == userId || isAdmin());
+
+      // Users may update their own basic profile fields,
+      // but cannot change their role.
+      allow update: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.role == resource.data.role;
+
+      // Only admins can delete users or change roles.
+      allow delete: if isAdmin();
+    }
+
+    // ------------------------------------------------------------
+    // PROJECTS
+    // ------------------------------------------------------------
+
+    match /projects/{projectId} {
+
+      allow read: if isStaff();
+
+      allow create: if isAdmin() || isDeveloper();
+
+      allow update: if isAdmin()
+        || (
+          isDeveloper()
+          && resource.data.ownerId == request.auth.uid
+        );
+
+      allow delete: if isAdmin();
+    }
+
+    // ------------------------------------------------------------
+    // TASKS
+    // ------------------------------------------------------------
+
+    match /tasks/{taskId} {
+
+      allow read: if isStaff();
+
+      allow create: if isAdmin() || isDeveloper();
+
+      allow update: if isAdmin()
+        || (
+          isDeveloper()
+          && resource.data.assigneeId == request.auth.uid
+        )
+        || (
+          isDeveloper()
+          && request.resource.data.assigneeId == request.auth.uid
+        );
+
+      allow delete: if isAdmin();
+    }
+
+    // ------------------------------------------------------------
+    // PROJECT UPDATES
+    // ------------------------------------------------------------
+
+    match /updates/{updateId} {
+
+      allow read: if isStaff();
+
+      allow create: if isStaff()
+        && request.resource.data.authorId == request.auth.uid;
+
+      allow update: if isAdmin()
+        || (
+          signedIn()
+          && resource.data.authorId == request.auth.uid
+        );
+
+      allow delete: if isAdmin()
+        || (
+          signedIn()
+          && resource.data.authorId == request.auth.uid
+        );
+    }
+
+    // ------------------------------------------------------------
+    // QA TICKETS
+    // ------------------------------------------------------------
+
+    match /tickets/{ticketId} {
+
+      allow read: if isStaff();
+
+      // Testers and admins can create tickets.
+      allow create: if (isTester() || isAdmin())
+        && request.resource.data.testerId == request.auth.uid;
+
+      // Admins can update anything.
+      allow update: if isAdmin();
+
+      // Developers can update tickets assigned to them.
+      allow update: if isDeveloper()
+        && resource.data.developerId == request.auth.uid;
+
+      // Testers can verify their own resolved tickets.
+      allow update: if isTester()
+        && resource.data.testerId == request.auth.uid
+        && resource.data.status == 'resolved'
+        && request.resource.data.status == 'verified';
+
+      allow delete: if isAdmin();
+    }
+
+    // ------------------------------------------------------------
+    // ACTIVITY
+    // ------------------------------------------------------------
+
+    match /activities/{activityId} {
+
+      allow read: if isStaff();
+
+      allow create: if isStaff()
+        && request.resource.data.actorId == request.auth.uid;
+
+      allow update, delete: if isAdmin();
+    }
+
+    // ------------------------------------------------------------
+    // MILESTONES
+    // ------------------------------------------------------------
+
+    match /milestones/{milestoneId} {
+
+      allow read: if isStaff();
+
+      allow create, update: if isAdmin() || isDeveloper();
+
+      allow delete: if isAdmin();
+    }
+
+    // ------------------------------------------------------------
+    // DENY EVERYTHING ELSE
+    // ------------------------------------------------------------
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

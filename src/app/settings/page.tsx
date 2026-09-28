@@ -1,0 +1,1 @@
+import AppShell from '@/components/AppShell';export default function Settings(){return <AppShell><h2>Settings</h2><div className="cardx mt-3"><h5>Firebase</h5><p className="muted">Authentication and Firestore are configured from your local environment variables. See the README for setup and security rules.</p></div></AppShell>}

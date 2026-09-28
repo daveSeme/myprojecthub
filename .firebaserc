@@ -1,0 +1,8 @@
+{
+  "projects": {
+    "staging": "dave-project-hub",
+    "default": "dave-project-hub"
+  },
+  "targets": {},
+  "etags": {}
+}
