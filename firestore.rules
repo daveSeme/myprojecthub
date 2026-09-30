@@ -3,14 +3,12 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    /* =====================================================
+       AUTHENTICATION
+    ===================================================== */
+
     function signedIn() {
       return request.auth != null;
-    }
-
-    function userDoc() {
-      return get(
-        /databases/$(database)/documents/users/$(request.auth.uid)
-      );
     }
 
     function hasProfile() {
@@ -20,173 +18,364 @@ service cloud.firestore {
         );
     }
 
+    function userDoc() {
+      return get(
+        /databases/$(database)/documents/users/$(request.auth.uid)
+      );
+    }
+
     function isAdmin() {
-      return hasProfile() && userDoc().data.role == 'admin';
+      return hasProfile()
+        && userDoc().data.role == 'admin';
     }
 
     function isDeveloper() {
-      return hasProfile() && userDoc().data.role == 'developer';
+      return hasProfile()
+        && userDoc().data.role == 'developer';
     }
 
     function isTester() {
-      return hasProfile() && userDoc().data.role == 'tester';
+      return hasProfile()
+        && userDoc().data.role == 'tester';
     }
 
     function isStaff() {
-      return isAdmin() || isDeveloper() || isTester();
+      return isAdmin()
+        || isDeveloper()
+        || isTester();
     }
 
-    // ------------------------------------------------------------
-    // USERS
-    // ------------------------------------------------------------
+
+    /* =====================================================
+       USERS
+    ===================================================== */
 
     match /users/{userId} {
 
-      // A newly registered user can create their own profile,
-      // but can NEVER register themselves as admin.
+      /*
+       * New users may create their own profile during
+       * registration.
+       *
+       * They cannot register themselves as admin.
+       */
       allow create: if signedIn()
         && request.auth.uid == userId
-        && request.resource.data.role in ['developer', 'tester'];
+        && request.resource.data.role in [
+          'developer',
+          'tester'
+        ];
 
-      // Users can read their own profile.
-      // Admins can read all profiles.
-      allow read: if signedIn()
-        && (request.auth.uid == userId || isAdmin());
+      /*
+       * Staff can read profiles.
+       *
+       * This is required because:
+       * - testers need developer names
+       * - admins manage the team
+       * - developers may need team information
+       */
+      allow read: if isStaff();
 
-      // Users may update their own basic profile fields,
-      // but cannot change their role.
+      /*
+       * Users can edit their own profile but cannot
+       * change their role.
+       */
       allow update: if signedIn()
         && request.auth.uid == userId
-        && request.resource.data.role == resource.data.role;
+        && request.resource.data.role
+          == resource.data.role;
 
-      // Only admins can delete users or change roles.
+      /*
+       * Admin can modify any user, including roles.
+       */
+      allow update: if isAdmin();
+
       allow delete: if isAdmin();
     }
 
-    // ------------------------------------------------------------
-    // PROJECTS
-    // ------------------------------------------------------------
+
+    /* =====================================================
+       PROJECTS
+    ===================================================== */
 
     match /projects/{projectId} {
 
-      allow read: if isStaff();
+      /*
+       * ADMIN:
+       *   Everything.
+       *
+       * DEVELOPER:
+       *   Projects they own.
+       *
+       * TESTER:
+       *   Projects where their UID is in testerIds.
+       */
+      allow read: if isAdmin()
+        || (
+          isDeveloper()
+          && resource.data.ownerId
+            == request.auth.uid
+        )
+        || (
+          isTester()
+          && request.auth.uid
+            in resource.data.get('testerIds', [])
+        );
 
-      allow create: if isAdmin() || isDeveloper();
+      /*
+       * ADMIN can create anything.
+       *
+       * DEVELOPER can create their own projects.
+       */
+      allow create: if isAdmin()
+        || (
+          isDeveloper()
+          && request.resource.data.ownerId
+            == request.auth.uid
+        );
 
+      /*
+       * ADMIN can update anything.
+       *
+       * DEVELOPER can update projects they own.
+       *
+       * Developer cannot transfer ownership.
+       * Developer cannot change tester assignments.
+       */
       allow update: if isAdmin()
         || (
           isDeveloper()
-          && resource.data.ownerId == request.auth.uid
+          && resource.data.ownerId
+            == request.auth.uid
+          && request.resource.data.ownerId
+            == resource.data.ownerId
+          && request.resource.data.get(
+            'testerIds',
+            []
+          )
+            == resource.data.get(
+              'testerIds',
+              []
+            )
         );
 
       allow delete: if isAdmin();
     }
 
-    // ------------------------------------------------------------
-    // TASKS
-    // ------------------------------------------------------------
+
+    /* =====================================================
+       TASKS
+    ===================================================== */
 
     match /tasks/{taskId} {
 
-      allow read: if isStaff();
+      /*
+       * ADMIN:
+       *   All tasks.
+       *
+       * DEVELOPER:
+       *   Assigned tasks.
+       *
+       * TESTER:
+       *   Assigned tasks.
+       */
+      allow read: if isAdmin()
+        || (
+          isDeveloper()
+          && resource.data.assigneeId
+            == request.auth.uid
+        )
+        || (
+          isTester()
+          && resource.data.assigneeId
+            == request.auth.uid
+        );
 
-      allow create: if isAdmin() || isDeveloper();
+      /*
+       * Admin can create any task.
+       *
+       * Developer can create a task assigned
+       * to themselves.
+       */
+      allow create: if isAdmin()
+        || (
+          isDeveloper()
+          && request.resource.data.assigneeId
+            == request.auth.uid
+        );
 
+      /*
+       * Admin can update anything.
+       *
+       * Developers/testers can update their own tasks
+       * without transferring assignment.
+       */
       allow update: if isAdmin()
         || (
           isDeveloper()
-          && resource.data.assigneeId == request.auth.uid
+          && resource.data.assigneeId
+            == request.auth.uid
+          && request.resource.data.assigneeId
+            == resource.data.assigneeId
         )
         || (
-          isDeveloper()
-          && request.resource.data.assigneeId == request.auth.uid
+          isTester()
+          && resource.data.assigneeId
+            == request.auth.uid
+          && request.resource.data.assigneeId
+            == resource.data.assigneeId
         );
 
       allow delete: if isAdmin();
     }
 
-    // ------------------------------------------------------------
-    // PROJECT UPDATES
-    // ------------------------------------------------------------
+
+    /* =====================================================
+       UPDATES
+    ===================================================== */
 
     match /updates/{updateId} {
 
-      allow read: if isStaff();
+      /*
+       * Admin sees all updates.
+       *
+       * Other users see updates they authored.
+       */
+      allow read: if isAdmin()
+        || (
+          isStaff()
+          && resource.data.authorId
+            == request.auth.uid
+        );
 
+      /*
+       * Users can only create an update under
+       * their own identity.
+       */
       allow create: if isStaff()
-        && request.resource.data.authorId == request.auth.uid;
+        && request.resource.data.authorId
+          == request.auth.uid;
 
+      /*
+       * Admin can edit anything.
+       *
+       * Authors can edit their own updates but
+       * cannot change the author.
+       */
       allow update: if isAdmin()
         || (
-          signedIn()
-          && resource.data.authorId == request.auth.uid
+          isStaff()
+          && resource.data.authorId
+            == request.auth.uid
+          && request.resource.data.authorId
+            == resource.data.authorId
         );
 
       allow delete: if isAdmin()
         || (
-          signedIn()
-          && resource.data.authorId == request.auth.uid
+          isStaff()
+          && resource.data.authorId
+            == request.auth.uid
         );
     }
 
-    // ------------------------------------------------------------
-    // QA TICKETS
-    // ------------------------------------------------------------
 
-    match /tickets/{ticketId} {
+    /* =====================================================
+       TICKETS
+    ===================================================== */
 
-      allow read: if isStaff();
+match /tickets/{ticketId} {
 
-      // Testers and admins can create tickets.
-      allow create: if (isTester() || isAdmin())
-        && request.resource.data.testerId == request.auth.uid;
+  // ADMIN
+  allow read, update, delete: if isAdmin();
 
-      // Admins can update anything.
-      allow update: if isAdmin();
+  // TESTER
+  allow read: if isTester()
+    && resource.data.testerId == request.auth.uid;
 
-      // Developers can update tickets assigned to them.
-      allow update: if isDeveloper()
-        && resource.data.developerId == request.auth.uid;
+  allow create: if isTester()
+    && request.resource.data.testerId == request.auth.uid;
 
-      // Testers can verify their own resolved tickets.
-      allow update: if isTester()
-        && resource.data.testerId == request.auth.uid
-        && resource.data.status == 'resolved'
-        && request.resource.data.status == 'verified';
+  allow update: if isTester()
+    && resource.data.testerId == request.auth.uid
+    && resource.data.status == 'resolved'
+    && request.resource.data.status == 'verified'
+    && request.resource.data.testerId == resource.data.testerId
+    && request.resource.data.developerId == resource.data.developerId
+    && request.resource.data.projectId == resource.data.projectId
+    && request.resource.data.priority == resource.data.priority;
 
-      allow delete: if isAdmin();
-    }
+  // DEVELOPER
+  allow read: if isDeveloper()
+    && resource.data.developerId == request.auth.uid;
 
-    // ------------------------------------------------------------
-    // ACTIVITY
-    // ------------------------------------------------------------
+  allow update: if isDeveloper()
+    && resource.data.developerId == request.auth.uid
+    && request.resource.data.developerId == resource.data.developerId
+    && request.resource.data.testerId == resource.data.testerId
+    && request.resource.data.projectId == resource.data.projectId
+    && (
+      (
+        resource.data.status == 'open'
+        && request.resource.data.status == 'in-progress'
+      )
+      ||
+      (
+        resource.data.status == 'in-progress'
+        && request.resource.data.status == 'resolved'
+      )
+    );
+
+  // No developer ticket creation
+  allow create: if isAdmin()
+    || (
+      isTester()
+      && request.resource.data.testerId == request.auth.uid
+    );
+
+  // Only admin can delete
+  allow delete: if isAdmin();
+}
+
+
+    /* =====================================================
+       ACTIVITIES
+    ===================================================== */
 
     match /activities/{activityId} {
 
-      allow read: if isStaff();
+      allow read: if isAdmin()
+        || (
+          isStaff()
+          && resource.data.actorId
+            == request.auth.uid
+        );
 
       allow create: if isStaff()
-        && request.resource.data.actorId == request.auth.uid;
+        && request.resource.data.actorId
+          == request.auth.uid;
 
       allow update, delete: if isAdmin();
     }
 
-    // ------------------------------------------------------------
-    // MILESTONES
-    // ------------------------------------------------------------
+
+    /* =====================================================
+       MILESTONES
+    ===================================================== */
 
     match /milestones/{milestoneId} {
 
       allow read: if isStaff();
 
-      allow create, update: if isAdmin() || isDeveloper();
+      allow create, update: if isAdmin()
+        || isDeveloper();
 
       allow delete: if isAdmin();
     }
 
-    // ------------------------------------------------------------
-    // DENY EVERYTHING ELSE
-    // ------------------------------------------------------------
+
+    /* =====================================================
+       DENY EVERYTHING ELSE
+    ===================================================== */
 
     match /{document=**} {
       allow read, write: if false;

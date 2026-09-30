@@ -33,8 +33,18 @@ export interface Project {
   deadline?: string;
   technologies: string[];
   repository?: string;
+
   ownerId: string;
   ownerName?: string;
+
+  /**
+   * Users who are allowed to perform QA on this project.
+   *
+   * This is intentionally an array because a project can
+   * have multiple testers.
+   */
+  testerIds?: string[];
+
   createdAt?: unknown;
 }
 
@@ -57,26 +67,32 @@ export interface Task {
 
   priority: Priority;
 
-  // Used by the project roadmap
+  /**
+   * Used by the project roadmap.
+   */
   phase?: string;
 
   dueDate?: string;
-
   createdAt?: unknown;
 }
 
 export interface Update {
   id: string;
+
   projectId: string;
   projectName?: string;
+
   authorId: string;
   authorName?: string;
+
   text: string;
+
   createdAt?: unknown;
 }
 
 export interface Ticket {
   id: string;
+
   title: string;
   description: string;
 

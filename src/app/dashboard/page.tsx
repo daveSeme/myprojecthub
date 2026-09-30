@@ -7,13 +7,14 @@ import AppShell from '@/components/AppShell';
 import { useAuth } from '@/components/AuthProvider';
 
 import {
-  listProjects,
-  listTasks,
-  listTickets,
-  listUpdates,
+  listProjectsForUser,
+  listTasksForUser,
+  listTicketsForUser,
+  listUpdatesForUser,
 } from '@/lib/firestore';
 
 import type {
+  Profile,
   Project,
   Task,
   Ticket,
@@ -30,14 +31,6 @@ type ActivityItem = {
   createdAt?: unknown;
 };
 
-type ProfileLike = {
-  uid: string;
-  name: string;
-  email?: string;
-  role: 'admin' | 'developer' | 'tester';
-  photoURL?: string;
-};
-
 function getTimestamp(value: unknown): number {
   try {
     if (
@@ -46,16 +39,10 @@ function getTimestamp(value: unknown): number {
       'toDate' in value &&
       typeof (value as { toDate?: unknown }).toDate === 'function'
     ) {
-      return (
-        value as { toDate: () => Date }
-      )
-        .toDate()
-        .getTime();
+      return (value as { toDate: () => Date }).toDate().getTime();
     }
 
-    const date = new Date(
-      value as string | number | Date,
-    );
+    const date = new Date(value as string | number | Date);
 
     return Number.isNaN(date.getTime())
       ? 0
@@ -72,14 +59,11 @@ function formatDate(value: unknown) {
 
   if (!timestamp) return 'Recently';
 
-  return new Date(timestamp).toLocaleDateString(
-    undefined,
-    {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    },
-  );
+  return new Date(timestamp).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
 }
 
 function statusLabel(status: Project['status']) {
@@ -95,26 +79,18 @@ function taskStatusLabel(status: Task['status']) {
 }
 
 function ticketStatusLabel(status: Ticket['status']) {
-  if (status === 'in-progress') {
-    return 'In Progress';
-  }
+  if (status === 'in-progress') return 'In Progress';
 
-  return (
-    status.charAt(0).toUpperCase() +
-    status.slice(1)
-  );
+  return status.charAt(0).toUpperCase() + status.slice(1);
 }
 
 function progressValue(value?: number) {
-  return Math.min(
-    100,
-    Math.max(0, value || 0),
-  );
+  return Math.min(100, Math.max(0, value || 0));
 }
 
 /* =========================================================
-   MAIN DASHBOARD
-   ========================================================= */
+   MAIN
+========================================================= */
 
 export default function Dashboard() {
   const { profile } = useAuth();
@@ -128,9 +104,13 @@ export default function Dashboard() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
 
-  async function loadDashboard(
-    showRefresh = false,
-  ) {
+  const isAdmin = profile?.role === 'admin';
+  const isDeveloper = profile?.role === 'developer';
+  const isTester = profile?.role === 'tester';
+
+  async function loadDashboard(showRefresh = false) {
+    if (!profile) return;
+
     try {
       if (showRefresh) {
         setRefreshing(true);
@@ -140,16 +120,31 @@ export default function Dashboard() {
 
       setError('');
 
+      /*
+       * IMPORTANT:
+       * These are now role-aware Firestore queries.
+       *
+       * Admin:
+       *   gets workspace-wide data.
+       *
+       * Developer:
+       *   gets owned projects, assigned tasks,
+       *   assigned tickets and authored updates.
+       *
+       * Tester:
+       *   gets ticket/project information connected
+       *   to their QA work.
+       */
       const [
         projectData,
         taskData,
         ticketData,
         updateData,
       ] = await Promise.all([
-        listProjects(),
-        listTasks(),
-        listTickets(),
-        listUpdates(),
+        listProjectsForUser(profile.uid, profile.role),
+        listTasksForUser(profile.uid, profile.role),
+        listTicketsForUser(profile.uid, profile.role),
+        listUpdatesForUser(profile.uid, profile.role),
       ]);
 
       setProjects(projectData);
@@ -157,9 +152,10 @@ export default function Dashboard() {
       setTickets(ticketData);
       setUpdates(updateData);
     } catch (err) {
-      console.error(err);
+      console.error('Dashboard loading error:', err);
+
       setError(
-        'Unable to load your workspace right now.',
+        'Unable to load your workspace right now. Check your Firebase permissions and try again.',
       );
     } finally {
       setLoading(false);
@@ -168,167 +164,187 @@ export default function Dashboard() {
   }
 
   useEffect(() => {
+    if (!profile) return;
+
     loadDashboard();
-  }, []);
+  }, [profile]);
 
-  /* =======================================================
-     ROLE
-     ======================================================= */
+  /* =========================================================
+     TESTER PROJECTS
+     
+     Current Project schema does not have testerIds.
+     Therefore tester project visibility is derived from
+     tickets. We build lightweight project cards from the
+     project information stored on those tickets.
+  ========================================================= */
 
-  const isAdmin =
-    profile?.role === 'admin';
+  const testerProjects = useMemo<Project[]>(() => {
+    if (!isTester) return [];
 
-  const isDeveloper =
-    profile?.role === 'developer';
+    const map = new Map<string, Project>();
 
-  const isTester =
-    profile?.role === 'tester';
+    tickets.forEach((ticket) => {
+      if (!ticket.projectId) return;
 
-  /* =======================================================
-     USER-SCOPED DATA
-     ======================================================= */
+      if (map.has(ticket.projectId)) return;
 
-  const myTasks = useMemo(() => {
-    if (!profile) return [];
-
-    if (isAdmin) {
-      return tasks;
-    }
-
-    return tasks.filter(
-      (task) =>
-        task.assigneeId === profile.uid,
-    );
-  }, [
-    tasks,
-    profile,
-    isAdmin,
-  ]);
-
-  const myTickets = useMemo(() => {
-    if (!profile) return [];
-
-    if (isAdmin) {
-      return tickets;
-    }
-
-    if (isDeveloper) {
-      return tickets.filter(
-        (ticket) =>
-          ticket.developerId === profile.uid,
-      );
-    }
-
-    if (isTester) {
-      return tickets.filter(
-        (ticket) =>
-          ticket.testerId === profile.uid,
-      );
-    }
-
-    return [];
-  }, [
-    tickets,
-    profile,
-    isAdmin,
-    isDeveloper,
-    isTester,
-  ]);
-
-  const myProjects = useMemo(() => {
-    if (!profile) return [];
-
-    if (isAdmin) {
-      return projects;
-    }
-
-    return projects.filter((project) => {
-      const ownsProject =
-        project.ownerId === profile.uid;
-
-      const hasMyTask = tasks.some(
-        (task) =>
-          task.projectId === project.id &&
-          task.assigneeId === profile.uid,
-      );
-
-      const hasMyTicket = tickets.some(
-        (ticket) =>
-          ticket.projectId === project.id &&
-          (
-            ticket.testerId === profile.uid ||
-            ticket.developerId === profile.uid
-          ),
-      );
-
-      return (
-        ownsProject ||
-        hasMyTask ||
-        hasMyTicket
-      );
+      map.set(ticket.projectId, {
+        id: ticket.projectId,
+        name: ticket.projectName || 'Project',
+        description: '',
+        type: 'QA',
+        status: 'active',
+        priority: ticket.priority,
+        progress: 0,
+        technologies: [],
+        ownerId: ticket.developerId || '',
+        ownerName: ticket.developerName,
+      });
     });
+
+    return Array.from(map.values());
+  }, [isTester, tickets]);
+
+  const visibleProjects = isTester
+    ? testerProjects
+    : projects;
+
+  /* =========================================================
+     PROJECT IDS
+  ========================================================= */
+
+  const visibleProjectIds = useMemo(
+    () =>
+      new Set(
+        visibleProjects.map(
+          (project) => project.id,
+        ),
+      ),
+    [visibleProjects],
+  );
+
+  /* =========================================================
+     ACTIVITY
+  ========================================================= */
+
+  const activity = useMemo<ActivityItem[]>(() => {
+    const projectEvents = projects.map((project) => ({
+      id: `project-${project.id}`,
+      type: 'project' as const,
+      title: `Project: ${project.name}`,
+      description:
+        project.description ||
+        'Project workspace created.',
+      projectName: project.name,
+      person: project.ownerName,
+      createdAt: project.createdAt,
+    }));
+
+    const taskEvents = tasks.map((task) => ({
+      id: `task-${task.id}`,
+      type: 'task' as const,
+      title: task.title,
+      description:
+        `Task is currently ${taskStatusLabel(
+          task.status,
+        ).toLowerCase()}.`,
+      projectName: task.projectName,
+      person: task.assigneeName,
+      createdAt: task.createdAt,
+    }));
+
+    const ticketEvents = tickets.map((ticket) => ({
+      id: `ticket-${ticket.id}`,
+      type: 'ticket' as const,
+      title: ticket.title,
+      description:
+        `QA ticket is ${ticketStatusLabel(
+          ticket.status,
+        ).toLowerCase()}.`,
+      projectName: ticket.projectName,
+      person:
+        isTester
+          ? ticket.developerName
+          : ticket.testerName,
+      createdAt: ticket.createdAt,
+    }));
+
+    const updateEvents = updates.map((update) => ({
+      id: `update-${update.id}`,
+      type: 'update' as const,
+      title: 'Project update posted',
+      description: update.text,
+      projectName: update.projectName,
+      person: update.authorName,
+      createdAt: update.createdAt,
+    }));
+
+    return [
+      ...projectEvents,
+      ...taskEvents,
+      ...ticketEvents,
+      ...updateEvents,
+    ]
+      .sort(
+        (a, b) =>
+          getTimestamp(b.createdAt) -
+          getTimestamp(a.createdAt),
+      )
+      .slice(0, 8);
   }, [
     projects,
     tasks,
     tickets,
-    profile,
-    isAdmin,
-  ]);
-
-  const myProjectIds = useMemo(
-    () =>
-      new Set(
-        myProjects.map(
-          (project) => project.id,
-        ),
-      ),
-    [myProjects],
-  );
-
-  const myUpdates = useMemo(() => {
-    if (!profile) return [];
-
-    if (isAdmin) {
-      return updates;
-    }
-
-    return updates.filter(
-      (update) =>
-        update.authorId === profile.uid ||
-        (
-          update.projectId &&
-          myProjectIds.has(
-            update.projectId,
-          )
-        ),
-    );
-  }, [
     updates,
-    profile,
-    isAdmin,
-    myProjectIds,
+    isTester,
   ]);
 
-  /* =======================================================
-     ADMIN METRICS
-     ======================================================= */
+  /* =========================================================
+     PROJECT METRICS
+  ========================================================= */
 
   const activeProjects = useMemo(
     () =>
-      projects.filter(
+      visibleProjects.filter(
         (project) =>
           project.status === 'active',
       ),
-    [projects],
+    [visibleProjects],
   );
 
   const completedProjects = useMemo(
     () =>
-      projects.filter(
+      visibleProjects.filter(
         (project) =>
           project.status === 'completed',
       ),
-    [projects],
+    [visibleProjects],
+  );
+
+  const overallProgress = useMemo(() => {
+    if (!visibleProjects.length) return 0;
+
+    return Math.round(
+      visibleProjects.reduce(
+        (total, project) =>
+          total +
+          progressValue(project.progress),
+        0,
+      ) / visibleProjects.length,
+    );
+  }, [visibleProjects]);
+
+  /* =========================================================
+     TASK METRICS
+  ========================================================= */
+
+  const completedTasks = useMemo(
+    () =>
+      tasks.filter(
+        (task) =>
+          task.status === 'done',
+      ),
+    [tasks],
   );
 
   const openTasks = useMemo(
@@ -340,14 +356,43 @@ export default function Dashboard() {
     [tasks],
   );
 
-  const completedTasks = useMemo(
-    () =>
-      tasks.filter(
+  const taskCompletion = useMemo(() => {
+    if (!tasks.length) return 0;
+
+    return Math.round(
+      (completedTasks.length / tasks.length) *
+        100,
+    );
+  }, [
+    tasks.length,
+    completedTasks.length,
+  ]);
+
+  const taskDistribution = useMemo(
+    () => ({
+      todo: tasks.filter(
         (task) =>
-          task.status === 'done',
-      ),
-    [tasks],
+          task.status === 'todo',
+      ).length,
+
+      inProgress: tasks.filter(
+        (task) =>
+          task.status === 'in-progress',
+      ).length,
+
+      review: tasks.filter(
+        (task) =>
+          task.status === 'review',
+      ).length,
+
+      done: completedTasks.length,
+    }),
+    [tasks, completedTasks.length],
   );
+
+  /* =========================================================
+     TICKET METRICS
+  ========================================================= */
 
   const openTickets = useMemo(
     () =>
@@ -370,301 +415,105 @@ export default function Dashboard() {
     [tickets],
   );
 
-  const overallProgress = useMemo(() => {
-    if (!projects.length) return 0;
-
-    return Math.round(
-      projects.reduce(
-        (total, project) =>
-          total +
-          progressValue(
-            project.progress,
-          ),
-        0,
-      ) / projects.length,
-    );
-  }, [projects]);
-
-  const taskCompletion = useMemo(() => {
-    if (!tasks.length) return 0;
-
-    return Math.round(
-      (
-        completedTasks.length /
-        tasks.length
-      ) * 100,
-    );
-  }, [
-    tasks.length,
-    completedTasks.length,
-  ]);
-
-  const qaHealth = useMemo(() => {
-    if (!tickets.length) return 100;
-
-    const healthy =
+  const resolvedTickets = useMemo(
+    () =>
       tickets.filter(
         (ticket) =>
           ticket.status === 'resolved' ||
           ticket.status === 'closed' ||
           ticket.status === 'verified',
-      ).length;
-
-    return Math.round(
-      (healthy / tickets.length) *
-      100,
-    );
-  }, [tickets]);
-
-  const adminActivity =
-    useMemo<ActivityItem[]>(() => {
-      const projectEvents =
-        projects.map((project) => ({
-          id: `project-${project.id}`,
-          type: 'project' as const,
-          title: `Project: ${project.name}`,
-          description:
-            project.description ||
-            'Project workspace created.',
-          projectName: project.name,
-          person: project.ownerName,
-          createdAt: project.createdAt,
-        }));
-
-      const taskEvents =
-        tasks.map((task) => ({
-          id: `task-${task.id}`,
-          type: 'task' as const,
-          title: task.title,
-          description:
-            `Task is currently ${taskStatusLabel(
-              task.status,
-            ).toLowerCase()}.`,
-          projectName: task.projectName,
-          person: task.assigneeName,
-          createdAt: task.createdAt,
-        }));
-
-      const ticketEvents =
-        tickets.map((ticket) => ({
-          id: `ticket-${ticket.id}`,
-          type: 'ticket' as const,
-          title: ticket.title,
-          description:
-            `QA ticket is ${ticketStatusLabel(
-              ticket.status,
-            ).toLowerCase()}.`,
-          projectName: ticket.projectName,
-          person: ticket.testerName,
-          createdAt: ticket.createdAt,
-        }));
-
-      const updateEvents =
-        updates.map((update) => ({
-          id: `update-${update.id}`,
-          type: 'update' as const,
-          title: 'Project update posted',
-          description: update.text,
-          projectName: update.projectName,
-          person: update.authorName,
-          createdAt: update.createdAt,
-        }));
-
-      return [
-        ...projectEvents,
-        ...taskEvents,
-        ...ticketEvents,
-        ...updateEvents,
-      ]
-        .sort(
-          (a, b) =>
-            getTimestamp(b.createdAt) -
-            getTimestamp(a.createdAt),
-        )
-        .slice(0, 6);
-    }, [
-      projects,
-      tasks,
-      tickets,
-      updates,
-    ]);
-
-  const recentProjects = useMemo(
-    () =>
-      [...projects]
-        .sort(
-          (a, b) =>
-            progressValue(b.progress) -
-            progressValue(a.progress),
-        )
-        .slice(0, 4),
-    [projects],
+      ),
+    [tickets],
   );
 
-  const taskDistribution =
-    useMemo(() => {
-      return {
-        todo: tasks.filter(
-          (task) =>
-            task.status === 'todo',
-        ).length,
+  const qaHealth = useMemo(() => {
+    if (!tickets.length) return 100;
 
-        inProgress: tasks.filter(
-          (task) =>
-            task.status === 'in-progress',
-        ).length,
+    return Math.round(
+      (resolvedTickets.length / tickets.length) *
+        100,
+    );
+  }, [
+    tickets.length,
+    resolvedTickets.length,
+  ]);
 
-        review: tasks.filter(
-          (task) =>
-            task.status === 'review',
-        ).length,
+  /* =========================================================
+     ROLE STATS
+  ========================================================= */
 
-        done: tasks.filter(
-          (task) =>
-            task.status === 'done',
-        ).length,
-      };
-    }, [tasks]);
+  const developerStats = useMemo(() => {
+    const inProgress = tasks.filter(
+      (task) =>
+        task.status === 'in-progress',
+    ).length;
 
-  /* =======================================================
-     DEVELOPER METRICS
-     ======================================================= */
+    const review = tasks.filter(
+      (task) =>
+        task.status === 'review',
+    ).length;
 
-  const developerStats =
-    useMemo(() => {
-      const completed =
-        myTasks.filter(
-          (task) =>
-            task.status === 'done',
-        ).length;
+    return {
+      completed: completedTasks.length,
+      open: openTasks.length,
+      review,
+      inProgress,
+      urgentTickets: criticalTickets.length,
+      projectProgress: overallProgress,
+    };
+  }, [
+    tasks,
+    completedTasks.length,
+    openTasks.length,
+    criticalTickets.length,
+    overallProgress,
+  ]);
 
-      const open =
-        myTasks.filter(
-          (task) =>
-            task.status !== 'done',
-        ).length;
+  const testerStats = useMemo(() => {
+    const total = tickets.length;
 
-      const review =
-        myTasks.filter(
-          (task) =>
-            task.status === 'review',
-        ).length;
+    const open = tickets.filter(
+      (ticket) =>
+        ticket.status === 'open',
+    ).length;
 
-      const inProgress =
-        myTasks.filter(
-          (task) =>
-            task.status === 'in-progress',
-        ).length;
+    const inProgress = tickets.filter(
+      (ticket) =>
+        ticket.status === 'in-progress',
+    ).length;
 
-      const urgentTickets =
-        myTickets.filter(
-          (ticket) =>
-            ticket.priority === 'critical' &&
-            ticket.status !== 'closed' &&
-            ticket.status !== 'verified',
-        ).length;
+    const resolved = tickets.filter(
+      (ticket) =>
+        ticket.status === 'resolved',
+    ).length;
 
-      const projectProgress =
-        myProjects.length
-          ? Math.round(
-              myProjects.reduce(
-                (sum, project) =>
-                  sum +
-                  progressValue(
-                    project.progress,
-                  ),
-                0,
-              ) / myProjects.length,
-            )
-          : 0;
+    const verified = tickets.filter(
+      (ticket) =>
+        ticket.status === 'verified' ||
+        ticket.status === 'closed',
+    ).length;
 
-      return {
-        completed,
-        open,
-        review,
-        inProgress,
-        urgentTickets,
-        projectProgress,
-      };
-    }, [
-      myTasks,
-      myTickets,
-      myProjects,
-    ]);
+    return {
+      total,
+      open,
+      inProgress,
+      resolved,
+      verified,
+      testingRate: total
+        ? Math.round(
+            (verified / total) * 100,
+          )
+        : 0,
+      projectProgress: overallProgress,
+    };
+  }, [
+    tickets,
+    overallProgress,
+  ]);
 
-  /* =======================================================
-     TESTER METRICS
-     ======================================================= */
-
-  const testerStats =
-    useMemo(() => {
-      const total =
-        myTickets.length;
-
-      const open =
-        myTickets.filter(
-          (ticket) =>
-            ticket.status === 'open',
-        ).length;
-
-      const inProgress =
-        myTickets.filter(
-          (ticket) =>
-            ticket.status === 'in-progress',
-        ).length;
-
-      const resolved =
-        myTickets.filter(
-          (ticket) =>
-            ticket.status === 'resolved',
-        ).length;
-
-      const verified =
-        myTickets.filter(
-          (ticket) =>
-            ticket.status === 'verified' ||
-            ticket.status === 'closed',
-        ).length;
-
-      const testingRate =
-        total
-          ? Math.round(
-              (verified / total) *
-              100,
-            )
-          : 0;
-
-      const projectProgress =
-        myProjects.length
-          ? Math.round(
-              myProjects.reduce(
-                (sum, project) =>
-                  sum +
-                  progressValue(
-                    project.progress,
-                  ),
-                0,
-              ) / myProjects.length,
-            )
-          : 0;
-
-      return {
-        total,
-        open,
-        inProgress,
-        resolved,
-        verified,
-        testingRate,
-        projectProgress,
-      };
-    }, [
-      myTickets,
-      myProjects,
-    ]);
-
-  /* =======================================================
+  /* =========================================================
      LOADING
-     ======================================================= */
+  ========================================================= */
 
   if (loading) {
     return (
@@ -674,63 +523,55 @@ export default function Dashboard() {
           <div className="dashboard-skeleton-hero skeleton mb-4" />
 
           <div className="row g-3 mb-4">
-            {[1, 2, 3, 4].map(
-              (item) => (
+            {[1, 2, 3, 4].map((item) => (
+              <div
+                className="col-12 col-md-6 col-xl-3"
+                key={item}
+              >
                 <div
-                  className="col-12 col-md-6 col-xl-3"
-                  key={item}
+                  className="cardx"
+                  style={{ height: 150 }}
                 >
                   <div
-                    className="cardx"
+                    className="skeleton mb-3"
                     style={{
-                      height: 150,
+                      width: 42,
+                      height: 42,
                     }}
-                  >
-                    <div
-                      className="skeleton mb-3"
-                      style={{
-                        width: 42,
-                        height: 42,
-                      }}
-                    />
+                  />
 
-                    <div
-                      className="skeleton mb-2"
-                      style={{
-                        width: '45%',
-                        height: 25,
-                      }}
-                    />
+                  <div
+                    className="skeleton mb-2"
+                    style={{
+                      width: '45%',
+                      height: 25,
+                    }}
+                  />
 
-                    <div
-                      className="skeleton"
-                      style={{
-                        width: '65%',
-                        height: 12,
-                      }}
-                    />
-                  </div>
+                  <div
+                    className="skeleton"
+                    style={{
+                      width: '65%',
+                      height: 12,
+                    }}
+                  />
                 </div>
-              ),
-            )}
+              </div>
+            ))}
           </div>
 
           <div className="row g-4">
             <div className="col-xl-8">
               <div
                 className="cardx skeleton"
-                style={{
-                  height: 390,
-                }}
+                style={{ height: 390 }}
               />
             </div>
 
             <div className="col-xl-4">
               <div
                 className="cardx skeleton"
-                style={{
-                  height: 390,
-                }}
+                style={{ height: 390 }}
               />
             </div>
           </div>
@@ -740,18 +581,19 @@ export default function Dashboard() {
     );
   }
 
-  /* =======================================================
-     DEVELOPER DASHBOARD
-     ======================================================= */
+  /* =========================================================
+     DEVELOPER
+  ========================================================= */
 
   if (isDeveloper) {
     return (
       <AppShell>
+
         <DeveloperDashboard
           profile={profile}
-          projects={myProjects}
-          tasks={myTasks}
-          tickets={myTickets}
+          projects={visibleProjects}
+          tasks={tasks}
+          tickets={tickets}
           stats={developerStats}
           refreshing={refreshing}
           onRefresh={() =>
@@ -760,38 +602,30 @@ export default function Dashboard() {
         />
 
         {error && (
-          <div className="dashboard-alert-wrap">
-            <div className="alert dashboard-alert">
-              <i className="bi bi-exclamation-circle me-2" />
-              {error}
-
-              <button
-                type="button"
-                className="btn btn-sm btn-dark ms-3"
-                onClick={() =>
-                  loadDashboard()
-                }
-              >
-                Retry
-              </button>
-            </div>
-          </div>
+          <DashboardError
+            error={error}
+            onRetry={() =>
+              loadDashboard()
+            }
+          />
         )}
+
       </AppShell>
     );
   }
 
-  /* =======================================================
-     TESTER DASHBOARD
-     ======================================================= */
+  /* =========================================================
+     TESTER
+  ========================================================= */
 
   if (isTester) {
     return (
       <AppShell>
+
         <TesterDashboard
           profile={profile}
-          projects={myProjects}
-          tickets={myTickets}
+          projects={visibleProjects}
+          tickets={tickets}
           stats={testerStats}
           refreshing={refreshing}
           onRefresh={() =>
@@ -800,36 +634,26 @@ export default function Dashboard() {
         />
 
         {error && (
-          <div className="dashboard-alert-wrap">
-            <div className="alert dashboard-alert">
-              <i className="bi bi-exclamation-circle me-2" />
-              {error}
-
-              <button
-                type="button"
-                className="btn btn-sm btn-dark ms-3"
-                onClick={() =>
-                  loadDashboard()
-                }
-              >
-                Retry
-              </button>
-            </div>
-          </div>
+          <DashboardError
+            error={error}
+            onRetry={() =>
+              loadDashboard()
+            }
+          />
         )}
+
       </AppShell>
     );
   }
 
-  /* =======================================================
-     ADMIN DASHBOARD
-     ======================================================= */
+  /* =========================================================
+     ADMIN
+  ========================================================= */
 
   return (
     <AppShell>
-      <div className="dashboard-page page-enter">
 
-        {/* HERO */}
+      <div className="dashboard-page page-enter">
 
         <section className="dashboard-hero gradient-panel mb-4">
 
@@ -889,9 +713,7 @@ export default function Dashboard() {
 
         {error && (
           <div className="alert dashboard-alert mb-4">
-
             <i className="bi bi-exclamation-circle me-2" />
-
             {error}
 
             <button
@@ -903,17 +725,16 @@ export default function Dashboard() {
             >
               Retry
             </button>
-
           </div>
         )}
 
-        {/* KPI */}
+        {/* ADMIN KPIs */}
 
         <section className="row g-3 mb-4">
 
           <AdminStatCard
             icon="bi-grid-1x2"
-            value={projects.length}
+            value={visibleProjects.length}
             label="Total projects"
             helper={`${activeProjects.length} currently active`}
             progress={overallProgress}
@@ -943,21 +764,19 @@ export default function Dashboard() {
             value={completedProjects.length}
             label="Completed projects"
             helper={
-              projects.length
+              visibleProjects.length
                 ? `${Math.round(
-                    (
-                      completedProjects.length /
-                      projects.length
-                    ) * 100,
+                    (completedProjects.length /
+                      visibleProjects.length) *
+                      100,
                   )}% of workspace`
                 : '0% of workspace'
             }
             progress={
-              projects.length
-                ? (
-                    completedProjects.length /
-                    projects.length
-                  ) * 100
+              visibleProjects.length
+                ? (completedProjects.length /
+                    visibleProjects.length) *
+                  100
                 : 0
             }
           />
@@ -980,7 +799,7 @@ export default function Dashboard() {
                 linkText="View all"
               />
 
-              {recentProjects.length === 0 ? (
+              {visibleProjects.length === 0 ? (
                 <DashboardEmpty
                   icon="bi-kanban"
                   title="No projects yet"
@@ -991,15 +810,23 @@ export default function Dashboard() {
               ) : (
                 <div className="dashboard-project-list">
 
-                  {recentProjects.map(
-                    (project, index) => (
-                      <ProjectRow
-                        key={project.id}
-                        project={project}
-                        index={index}
-                      />
-                    ),
-                  )}
+                  {visibleProjects
+                    .slice()
+                    .sort(
+                      (a, b) =>
+                        progressValue(b.progress) -
+                        progressValue(a.progress),
+                    )
+                    .slice(0, 6)
+                    .map(
+                      (project, index) => (
+                        <ProjectRow
+                          key={project.id}
+                          project={project}
+                          index={index}
+                        />
+                      ),
+                    )}
 
                 </div>
               )}
@@ -1092,12 +919,7 @@ export default function Dashboard() {
                   ).length
                 }
                 resolved={
-                  tickets.filter(
-                    (ticket) =>
-                      ticket.status === 'resolved' ||
-                      ticket.status === 'closed' ||
-                      ticket.status === 'verified',
-                  ).length
+                  resolvedTickets.length
                 }
               />
 
@@ -1119,7 +941,7 @@ export default function Dashboard() {
                 linkText="Full activity"
               />
 
-              {adminActivity.length === 0 ? (
+              {activity.length === 0 ? (
                 <DashboardEmpty
                   icon="bi-activity"
                   title="No activity yet"
@@ -1128,7 +950,7 @@ export default function Dashboard() {
               ) : (
                 <div className="dashboard-activity-list">
 
-                  {adminActivity.map(
+                  {activity.map(
                     (item, index) => (
                       <ActivityRow
                         key={item.id}
@@ -1209,13 +1031,43 @@ export default function Dashboard() {
       </div>
 
       <DashboardStyles />
+
     </AppShell>
   );
 }
 
 /* =========================================================
-   DASHBOARD ORBIT
-   ========================================================= */
+   ERROR
+========================================================= */
+
+function DashboardError({
+  error,
+  onRetry,
+}: {
+  error: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="dashboard-alert-wrap">
+      <div className="alert dashboard-alert">
+        <i className="bi bi-exclamation-circle me-2" />
+        {error}
+
+        <button
+          type="button"
+          className="btn btn-sm btn-dark ms-3"
+          onClick={onRetry}
+        >
+          Retry
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================
+   ORBIT
+========================================================= */
 
 function DashboardOrbit({
   progress,
@@ -1251,13 +1103,8 @@ function DashboardOrbit({
         <i className="bi bi-check2-circle" />
 
         <div>
-          <strong>
-            {completed}
-          </strong>
-
-          <span>
-            completed
-          </span>
+          <strong>{completed}</strong>
+          <span>completed</span>
         </div>
 
       </div>
@@ -1267,13 +1114,8 @@ function DashboardOrbit({
         <i className="bi bi-bug" />
 
         <div>
-          <strong>
-            {openTickets}
-          </strong>
-
-          <span>
-            open QA
-          </span>
+          <strong>{openTickets}</strong>
+          <span>open QA</span>
         </div>
 
       </div>
@@ -1284,7 +1126,7 @@ function DashboardOrbit({
 
 /* =========================================================
    ADMIN STAT
-   ========================================================= */
+========================================================= */
 
 function AdminStatCard({
   icon,
@@ -1334,10 +1176,7 @@ function AdminStatCard({
             style={{
               width: `${Math.min(
                 100,
-                Math.max(
-                  0,
-                  progress,
-                ),
+                Math.max(0, progress),
               )}%`,
             }}
           />
@@ -1355,643 +1194,8 @@ function AdminStatCard({
 }
 
 /* =========================================================
-   SECTION HEADER
-   ========================================================= */
-
-function DashboardSectionHeader({
-  kicker,
-  title,
-  description,
-  href,
-  linkText = 'View all',
-}: {
-  kicker: string;
-  title: string;
-  description?: string;
-  href?: string;
-  linkText?: string;
-}) {
-  return (
-    <div className="dashboard-section-header">
-
-      <div>
-
-        <div className="dashboard-section-kicker">
-          {kicker}
-        </div>
-
-        <h3 className="mb-1">
-          {title}
-        </h3>
-
-        {description && (
-          <p className="muted mb-0">
-            {description}
-          </p>
-        )}
-
-      </div>
-
-      {href && (
-        <Link
-          href={href}
-          className="dashboard-view-link"
-        >
-          {linkText}
-
-          <i className="bi bi-arrow-up-right ms-1" />
-        </Link>
-      )}
-
-    </div>
-  );
-}
-
-/* =========================================================
-   PROJECT ROW
-   ========================================================= */
-
-function ProjectRow({
-  project,
-  index,
-}: {
-  project: Project;
-  index: number;
-}) {
-  const progress =
-    progressValue(project.progress);
-
-  return (
-    <Link
-      href={`/projects/${project.id}`}
-      className="dashboard-project-row"
-      style={{
-        animationDelay:
-          `${index * 70}ms`,
-      }}
-    >
-
-      <div className="dashboard-project-number">
-        {String(index + 1).padStart(2, '0')}
-      </div>
-
-      <div className="dashboard-project-main">
-
-        <div className="dashboard-project-heading">
-
-          <div>
-            <strong>
-              {project.name}
-            </strong>
-
-            <span>
-              {project.type}
-
-              {project.client
-                ? ` · ${project.client}`
-                : ''}
-            </span>
-          </div>
-
-          <span
-            className={`badge-soft text-capitalize dashboard-project-status status-${project.status}`}
-          >
-            {statusLabel(
-              project.status,
-            )}
-          </span>
-
-        </div>
-
-        <div className="dashboard-project-progress">
-
-          <div className="progress">
-
-            <div
-              className="progress-bar"
-              style={{
-                width: `${progress}%`,
-              }}
-            />
-
-          </div>
-
-          <strong>
-            {Math.round(progress)}%
-          </strong>
-
-        </div>
-
-      </div>
-
-      <i className="bi bi-chevron-right dashboard-project-arrow" />
-
-    </Link>
-  );
-}
-
-/* =========================================================
-   HEALTH
-   ========================================================= */
-
-function HealthOverview({
-  progress,
-  taskCompletion,
-  qaHealth,
-  activeProjects,
-}: {
-  progress: number;
-  taskCompletion: number;
-  qaHealth: number;
-  activeProjects: number;
-}) {
-  const degrees =
-    progress * 3.6;
-
-  return (
-    <>
-      <div className="dashboard-health">
-
-        <div
-          className="dashboard-health-ring"
-          style={{
-            background:
-              `conic-gradient(
-                #7657e8 ${degrees}deg,
-                rgba(118,87,232,.08) ${degrees}deg
-              )`,
-          }}
-        >
-
-          <div>
-            <strong>
-              {progress}%
-            </strong>
-
-            <span>
-              overall
-            </span>
-          </div>
-
-        </div>
-
-        <div className="dashboard-health-copy">
-
-          <strong>
-            Delivery health
-          </strong>
-
-          <p>
-            Your workspace is currently averaging{' '}
-            <b>{progress}%</b> progress
-            across all projects.
-          </p>
-
-          <Link
-            href="/activity"
-            className="dashboard-text-link"
-          >
-            Inspect activity
-
-            <i className="bi bi-arrow-right ms-1" />
-          </Link>
-
-        </div>
-
-      </div>
-
-      <div className="dashboard-health-stats">
-
-        <div>
-          <span>
-            <i className="bi bi-check2-circle" />
-            Tasks done
-          </span>
-
-          <strong>
-            {taskCompletion}%
-          </strong>
-        </div>
-
-        <div>
-          <span>
-            <i className="bi bi-shield-check" />
-            QA health
-          </span>
-
-          <strong>
-            {qaHealth}%
-          </strong>
-        </div>
-
-        <div>
-          <span>
-            <i className="bi bi-lightning" />
-            Active projects
-          </span>
-
-          <strong>
-            {activeProjects}
-          </strong>
-        </div>
-
-      </div>
-    </>
-  );
-}
-
-/* =========================================================
-   TASK OVERVIEW
-   ========================================================= */
-
-function TaskOverview({
-  total,
-  todo,
-  inProgress,
-  review,
-  done,
-}: {
-  total: number;
-  todo: number;
-  inProgress: number;
-  review: number;
-  done: number;
-}) {
-  return (
-    <div className="dashboard-task-chart">
-
-      <div className="dashboard-task-donut">
-
-        <div>
-          <strong>
-            {total}
-          </strong>
-
-          <span>
-            total
-          </span>
-        </div>
-
-      </div>
-
-      <div className="dashboard-task-legend">
-
-        <TaskLegend
-          label="To do"
-          value={todo}
-          className="todo"
-        />
-
-        <TaskLegend
-          label="In progress"
-          value={inProgress}
-          className="progress"
-        />
-
-        <TaskLegend
-          label="Review"
-          value={review}
-          className="review"
-        />
-
-        <TaskLegend
-          label="Done"
-          value={done}
-          className="done"
-        />
-
-      </div>
-
-    </div>
-  );
-}
-
-function TaskLegend({
-  label,
-  value,
-  className,
-}: {
-  label: string;
-  value: number;
-  className: string;
-}) {
-  return (
-    <div>
-
-      <span>
-        <i
-          className={`legend-dot ${className}`}
-        />
-
-        {label}
-      </span>
-
-      <strong>
-        {value}
-      </strong>
-
-    </div>
-  );
-}
-
-/* =========================================================
-   QA
-   ========================================================= */
-
-function QAOverview({
-  health,
-  open,
-  inProgress,
-  resolved,
-}: {
-  health: number;
-  open: number;
-  inProgress: number;
-  resolved: number;
-}) {
-  return (
-    <div className="dashboard-qa-grid">
-
-      <div className="dashboard-qa-main">
-
-        <div className="dashboard-qa-number">
-          {health}
-          <span>%</span>
-        </div>
-
-        <div className="progress mt-2">
-
-          <div
-            className="progress-bar"
-            style={{
-              width: `${health}%`,
-            }}
-          />
-
-        </div>
-
-        <small className="muted">
-          Resolved, closed or verified tickets
-        </small>
-
-      </div>
-
-      <div className="dashboard-qa-items">
-
-        <div>
-          <span>
-            <i className="bi bi-exclamation-circle" />
-            Open
-          </span>
-
-          <strong>
-            {open}
-          </strong>
-        </div>
-
-        <div>
-          <span>
-            <i className="bi bi-arrow-repeat" />
-            In progress
-          </span>
-
-          <strong>
-            {inProgress}
-          </strong>
-        </div>
-
-        <div>
-          <span>
-            <i className="bi bi-check2" />
-            Resolved
-          </span>
-
-          <strong>
-            {resolved}
-          </strong>
-        </div>
-
-      </div>
-
-    </div>
-  );
-}
-
-/* =========================================================
-   ACTIVITY
-   ========================================================= */
-
-function ActivityRow({
-  item,
-  index,
-}: {
-  item: ActivityItem;
-  index: number;
-}) {
-  const icon =
-    item.type === 'project'
-      ? 'bi-kanban'
-      : item.type === 'task'
-        ? 'bi-check2-square'
-        : item.type === 'ticket'
-          ? 'bi-bug'
-          : 'bi-journal-text';
-
-  return (
-    <div
-      className="dashboard-activity-item"
-      style={{
-        animationDelay:
-          `${index * 60}ms`,
-      }}
-    >
-
-      <div
-        className={`dashboard-activity-icon ${item.type}`}
-      >
-        <i className={`bi ${icon}`} />
-      </div>
-
-      <div className="dashboard-activity-body">
-
-        <div className="dashboard-activity-title">
-
-          <strong>
-            {item.title}
-          </strong>
-
-          <span>
-            {formatDate(
-              item.createdAt,
-            )}
-          </span>
-
-        </div>
-
-        <p>
-          {item.description}
-        </p>
-
-        <div className="dashboard-activity-meta">
-
-          {item.projectName && (
-            <span>
-              <i className="bi bi-folder2" />
-              {item.projectName}
-            </span>
-          )}
-
-          {item.person && (
-            <span>
-              <i className="bi bi-person" />
-              {item.person}
-            </span>
-          )}
-
-        </div>
-
-      </div>
-
-    </div>
-  );
-}
-
-/* =========================================================
-   QUICK ACTION
-   ========================================================= */
-
-function DashboardAction({
-  href,
-  icon,
-  iconClass,
-  title,
-  description,
-}: {
-  href: string;
-  icon: string;
-  iconClass: string;
-  title: string;
-  description: string;
-}) {
-  return (
-    <Link
-      href={href}
-      className="dashboard-action"
-    >
-
-      <div
-        className={`dashboard-action-icon ${iconClass}`}
-      >
-        <i className={`bi ${icon}`} />
-      </div>
-
-      <div>
-
-        <strong>
-          {title}
-        </strong>
-
-        <span>
-          {description}
-        </span>
-
-      </div>
-
-      <i className="bi bi-arrow-up-right" />
-
-    </Link>
-  );
-}
-
-/* =========================================================
-   EMPTY
-   ========================================================= */
-
-function DashboardEmpty({
-  icon,
-  title,
-  description,
-  href,
-  action,
-}: {
-  icon: string;
-  title: string;
-  description: string;
-  href?: string;
-  action?: string;
-}) {
-  return (
-    <div className="dashboard-empty">
-
-      <div className="empty-state-icon">
-        <i className={`bi ${icon}`} />
-      </div>
-
-      <strong>
-        {title}
-      </strong>
-
-      <p className="muted mb-3">
-        {description}
-      </p>
-
-      {href && action && (
-        <Link
-          href={href}
-          className="btn btn-dark btn-sm"
-        >
-          {action}
-        </Link>
-      )}
-
-    </div>
-  );
-}
-
-/* =========================================================
-   FOOTER
-   ========================================================= */
-
-function DashboardFooter({
-  refreshing,
-  onRefresh,
-}: {
-  refreshing: boolean;
-  onRefresh: () => void;
-}) {
-  return (
-    <div className="dashboard-footer mt-4">
-
-      <span>
-        Workspace synced from Firebase
-      </span>
-
-      <button
-        type="button"
-        className="dashboard-refresh"
-        onClick={onRefresh}
-        disabled={refreshing}
-      >
-        <i
-          className={`bi ${
-            refreshing
-              ? 'bi-arrow-repeat spin'
-              : 'bi-arrow-clockwise'
-          }`}
-        />
-
-        {refreshing
-          ? 'Refreshing...'
-          : 'Refresh'}
-      </button>
-
-    </div>
-  );
-}
-
-/* =========================================================
-   DEVELOPER DASHBOARD
-   ========================================================= */
+   DEVELOPER
+========================================================= */
 
 function DeveloperDashboard({
   profile,
@@ -2002,7 +1206,7 @@ function DeveloperDashboard({
   refreshing,
   onRefresh,
 }: {
-  profile: ProfileLike | null;
+  profile: Profile | null;
   projects: Project[];
   tasks: Task[];
   tickets: Ticket[];
@@ -2023,7 +1227,7 @@ function DeveloperDashboard({
         getTimestamp(b.createdAt) -
         getTimestamp(a.createdAt),
     )
-    .slice(0, 5);
+    .slice(0, 6);
 
   const recentTickets = [...tickets]
     .sort(
@@ -2031,7 +1235,26 @@ function DeveloperDashboard({
         getTimestamp(b.createdAt) -
         getTimestamp(a.createdAt),
     )
-    .slice(0, 5);
+    .slice(0, 6);
+
+  const developerQaHealth = tickets.length
+    ? Math.round(
+        (tickets.filter(
+          (ticket) =>
+            ticket.status === 'resolved' ||
+            ticket.status === 'closed' ||
+            ticket.status === 'verified',
+        ).length /
+          tickets.length) *
+          100,
+      )
+    : 100;
+
+  const completion = tasks.length
+    ? Math.round(
+        (stats.completed / tasks.length) * 100,
+      )
+    : 0;
 
   return (
     <div className="dashboard-page page-enter">
@@ -2084,15 +1307,19 @@ function DeveloperDashboard({
           <DashboardOrbit
             progress={stats.projectProgress}
             completed={stats.completed}
-            openTickets={tickets.length}
+            openTickets={
+              tickets.filter(
+                (ticket) =>
+                  ticket.status !== 'closed' &&
+                  ticket.status !== 'verified',
+              ).length
+            }
             label="my projects"
           />
 
         </div>
 
       </section>
-
-      {/* DEVELOPER KPIs */}
 
       <section className="row g-3 mb-4">
 
@@ -2110,14 +1337,7 @@ function DeveloperDashboard({
           value={stats.open}
           label="Open tasks"
           helper={`${stats.completed} completed`}
-          progress={
-            tasks.length
-              ? (
-                  stats.completed /
-                  tasks.length
-                ) * 100
-              : 0
-          }
+          progress={completion}
         />
 
         <DeveloperStat
@@ -2128,10 +1348,9 @@ function DeveloperDashboard({
           helper={`${stats.review} awaiting review`}
           progress={
             tasks.length
-              ? (
-                  stats.inProgress /
-                  tasks.length
-                ) * 100
+              ? (stats.inProgress /
+                  tasks.length) *
+                100
               : 0
           }
         />
@@ -2142,23 +1361,12 @@ function DeveloperDashboard({
           value={tickets.length}
           label="QA tickets"
           helper={`${stats.urgentTickets} critical`}
-          progress={
-            tickets.length
-              ? Math.min(
-                  100,
-                  (stats.urgentTickets /
-                    tickets.length) *
-                    100,
-                )
-              : 0
-          }
+          progress={developerQaHealth}
         />
 
       </section>
 
       <div className="row g-4">
-
-        {/* MY PROJECTS */}
 
         <div className="col-xl-8">
 
@@ -2167,7 +1375,7 @@ function DeveloperDashboard({
             <DashboardSectionHeader
               kicker="MY DELIVERY"
               title="My projects"
-              description="Projects you're responsible for or actively contributing to."
+              description="Projects you own and are responsible for."
               href="/projects"
               linkText="View all"
             />
@@ -2182,6 +1390,12 @@ function DeveloperDashboard({
               <div className="dashboard-project-list">
 
                 {projects
+                  .slice()
+                  .sort(
+                    (a, b) =>
+                      progressValue(b.progress) -
+                      progressValue(a.progress),
+                  )
                   .slice(0, 6)
                   .map(
                     (project, index) => (
@@ -2200,8 +1414,6 @@ function DeveloperDashboard({
 
         </div>
 
-        {/* DELIVERY HEALTH */}
-
         <div className="col-xl-4">
 
           <section className="cardx dashboard-section">
@@ -2212,34 +1424,9 @@ function DeveloperDashboard({
             />
 
             <HealthOverview
-              progress={
-                stats.projectProgress
-              }
-              taskCompletion={
-                tasks.length
-                  ? Math.round(
-                      (
-                        stats.completed /
-                        tasks.length
-                      ) * 100,
-                    )
-                  : 0
-              }
-              qaHealth={
-                tickets.length
-                  ? Math.round(
-                      (
-                        tickets.filter(
-                          (ticket) =>
-                            ticket.status === 'resolved' ||
-                            ticket.status === 'closed' ||
-                            ticket.status === 'verified',
-                        ).length /
-                        tickets.length
-                      ) * 100,
-                    )
-                  : 100
-              }
+              progress={stats.projectProgress}
+              taskCompletion={completion}
+              qaHealth={developerQaHealth}
               activeProjects={
                 projects.filter(
                   (project) =>
@@ -2251,8 +1438,6 @@ function DeveloperDashboard({
           </section>
 
         </div>
-
-        {/* MY TASKS */}
 
         <div className="col-xl-7">
 
@@ -2275,43 +1460,39 @@ function DeveloperDashboard({
             ) : (
               <div className="dashboard-personal-list">
 
-                {recentTasks.map(
-                  (task) => (
-                    <div
-                      key={task.id}
-                      className="dashboard-personal-row"
-                    >
+                {recentTasks.map((task) => (
+                  <div
+                    key={task.id}
+                    className="dashboard-personal-row"
+                  >
 
-                      <div className="dashboard-personal-icon purple">
-                        <i className="bi bi-check2-square" />
-                      </div>
+                    <div className="dashboard-personal-icon purple">
+                      <i className="bi bi-check2-square" />
+                    </div>
 
-                      <div className="dashboard-personal-main">
+                    <div className="dashboard-personal-main">
 
-                        <strong>
-                          {task.title}
-                        </strong>
+                      <strong>
+                        {task.title}
+                      </strong>
 
-                        <span>
-                          {task.projectName ||
-                            'Project'}
-
-                          {' · '}
-
-                          {taskStatusLabel(
-                            task.status,
-                          )}
-                        </span>
-
-                      </div>
-
-                      <span className="dashboard-personal-status">
-                        {task.priority}
+                      <span>
+                        {task.projectName ||
+                          'Project'}
+                        {' · '}
+                        {taskStatusLabel(
+                          task.status,
+                        )}
                       </span>
 
                     </div>
-                  ),
-                )}
+
+                    <span className="dashboard-personal-status">
+                      {task.priority}
+                    </span>
+
+                  </div>
+                ))}
 
               </div>
             )}
@@ -2319,8 +1500,6 @@ function DeveloperDashboard({
           </section>
 
         </div>
-
-        {/* QA */}
 
         <div className="col-xl-5">
 
@@ -2343,43 +1522,39 @@ function DeveloperDashboard({
             ) : (
               <div className="dashboard-personal-list">
 
-                {recentTickets.map(
-                  (ticket) => (
-                    <div
-                      key={ticket.id}
-                      className="dashboard-personal-row"
-                    >
+                {recentTickets.map((ticket) => (
+                  <div
+                    key={ticket.id}
+                    className="dashboard-personal-row"
+                  >
 
-                      <div className="dashboard-personal-icon gold">
-                        <i className="bi bi-bug" />
-                      </div>
+                    <div className="dashboard-personal-icon gold">
+                      <i className="bi bi-bug" />
+                    </div>
 
-                      <div className="dashboard-personal-main">
+                    <div className="dashboard-personal-main">
 
-                        <strong>
-                          {ticket.title}
-                        </strong>
+                      <strong>
+                        {ticket.title}
+                      </strong>
 
-                        <span>
-                          {ticket.projectName ||
-                            'Project'}
-
-                          {' · '}
-
-                          {ticketStatusLabel(
-                            ticket.status,
-                          )}
-                        </span>
-
-                      </div>
-
-                      <span className="dashboard-personal-status">
-                        {ticket.priority}
+                      <span>
+                        {ticket.projectName ||
+                          'Project'}
+                        {' · '}
+                        {ticketStatusLabel(
+                          ticket.status,
+                        )}
                       </span>
 
                     </div>
-                  ),
-                )}
+
+                    <span className="dashboard-personal-status">
+                      {ticket.priority}
+                    </span>
+
+                  </div>
+                ))}
 
               </div>
             )}
@@ -2396,81 +1571,14 @@ function DeveloperDashboard({
       />
 
       <DeveloperTesterStyles />
-    </div>
-  );
-}
-
-function DeveloperStat({
-  icon,
-  iconClass = '',
-  value,
-  label,
-  helper,
-  progress,
-}: {
-  icon: string;
-  iconClass?: string;
-  value: number;
-  label: string;
-  helper: string;
-  progress: number;
-}) {
-  return (
-    <div className="col-12 col-md-6 col-xl-3">
-
-      <div className="cardx dashboard-stat-card">
-
-        <div className="dashboard-stat-top">
-
-          <div
-            className={`stat-icon ${iconClass}`}
-          >
-            <i className={`bi ${icon}`} />
-          </div>
-
-          <span className="dashboard-stat-label">
-            My work
-          </span>
-
-        </div>
-
-        <div className="stat mt-3">
-          {value}
-        </div>
-
-        <div className="stat-label">
-          {label}
-        </div>
-
-        <div className="dashboard-mini-progress mt-3">
-
-          <span
-            style={{
-              width: `${Math.min(
-                100,
-                Math.max(
-                  0,
-                  progress,
-                ),
-              )}%`,
-            }}
-          />
-
-        </div>
-
-        <small className="muted">
-          {helper}
-        </small>
-
-      </div>
 
     </div>
   );
 }
 
 /* =========================================================
-   TESTER DASHBOARD
-   ========================================================= */
+   TESTER
+========================================================= */
 
 function TesterDashboard({
   profile,
@@ -2480,7 +1588,7 @@ function TesterDashboard({
   refreshing,
   onRefresh,
 }: {
-  profile: ProfileLike | null;
+  profile: Profile | null;
   projects: Project[];
   tickets: Ticket[];
   stats: {
@@ -2525,9 +1633,9 @@ function TesterDashboard({
 
             <p>
               Welcome back, {profile?.name}.
-              Track the projects you're testing,
-              the issues you've raised and your
-              testing progress.
+              Track the issues you've raised,
+              testing progress and projects connected
+              to your QA work.
             </p>
 
             <div className="d-flex flex-wrap gap-2 mt-4">
@@ -2563,15 +1671,13 @@ function TesterDashboard({
 
       </section>
 
-      {/* TESTER KPIs */}
-
       <section className="row g-3 mb-4">
 
         <TesterStat
           icon="bi-kanban"
           value={projects.length}
           label="Projects involved"
-          helper={`${stats.projectProgress}% average project progress`}
+          helper={`${stats.projectProgress}% average progress`}
           progress={stats.projectProgress}
         />
 
@@ -2583,11 +1689,9 @@ function TesterDashboard({
           helper={`${stats.open} currently open`}
           progress={
             stats.total
-              ? (
-                  (stats.total -
-                    stats.open) /
-                  stats.total
-                ) * 100
+              ? ((stats.total - stats.open) /
+                  stats.total) *
+                100
               : 0
           }
         />
@@ -2600,10 +1704,9 @@ function TesterDashboard({
           helper={`${stats.resolved} resolved`}
           progress={
             stats.total
-              ? (
-                  stats.inProgress /
-                  stats.total
-                ) * 100
+              ? (stats.inProgress /
+                  stats.total) *
+                100
               : 0
           }
         />
@@ -2622,8 +1725,6 @@ function TesterDashboard({
 
       <div className="row g-4">
 
-        {/* PROJECTS */}
-
         <div className="col-xl-7">
 
           <section className="cardx dashboard-section">
@@ -2631,7 +1732,7 @@ function TesterDashboard({
             <DashboardSectionHeader
               kicker="PROJECT INVOLVEMENT"
               title="Projects I'm testing"
-              description="Projects connected to your QA work."
+              description="Projects connected to your QA tickets."
               href="/projects"
               linkText="View all"
             />
@@ -2663,8 +1764,6 @@ function TesterDashboard({
           </section>
 
         </div>
-
-        {/* TESTING RATE */}
 
         <div className="col-xl-5">
 
@@ -2757,8 +1856,6 @@ function TesterDashboard({
 
         </div>
 
-        {/* TICKETS */}
-
         <div className="col-xl-8">
 
           <section className="cardx dashboard-section">
@@ -2780,47 +1877,43 @@ function TesterDashboard({
             ) : (
               <div className="dashboard-personal-list">
 
-                {recentTickets.map(
-                  (ticket) => (
-                    <div
-                      key={ticket.id}
-                      className="dashboard-personal-row"
-                    >
+                {recentTickets.map((ticket) => (
+                  <div
+                    key={ticket.id}
+                    className="dashboard-personal-row"
+                  >
 
-                      <div className="dashboard-personal-icon gold">
-                        <i className="bi bi-bug" />
-                      </div>
+                    <div className="dashboard-personal-icon gold">
+                      <i className="bi bi-bug" />
+                    </div>
 
-                      <div className="dashboard-personal-main">
+                    <div className="dashboard-personal-main">
 
-                        <strong>
-                          {ticket.title}
-                        </strong>
+                      <strong>
+                        {ticket.title}
+                      </strong>
 
-                        <span>
-                          {ticket.projectName ||
-                            'Project'}
-
-                          {' · '}
-
-                          {ticketStatusLabel(
-                            ticket.status,
-                          )}
-                        </span>
-
-                      </div>
-
-                      <span
-                        className={`dashboard-ticket-status status-${ticket.status}`}
-                      >
+                      <span>
+                        {ticket.projectName ||
+                          'Project'}
+                        {' · '}
                         {ticketStatusLabel(
                           ticket.status,
                         )}
                       </span>
 
                     </div>
-                  ),
-                )}
+
+                    <span
+                      className={`dashboard-ticket-status status-${ticket.status}`}
+                    >
+                      {ticketStatusLabel(
+                        ticket.status,
+                      )}
+                    </span>
+
+                  </div>
+                ))}
 
               </div>
             )}
@@ -2828,8 +1921,6 @@ function TesterDashboard({
           </section>
 
         </div>
-
-        {/* TESTING SUMMARY */}
 
         <div className="col-xl-4">
 
@@ -2843,53 +1934,28 @@ function TesterDashboard({
             <div className="tester-summary">
 
               <div className="tester-summary-row">
-                <span>
-                  Tickets raised
-                </span>
-
-                <strong>
-                  {stats.total}
-                </strong>
+                <span>Tickets raised</span>
+                <strong>{stats.total}</strong>
               </div>
 
               <div className="tester-summary-row">
-                <span>
-                  Currently open
-                </span>
-
-                <strong>
-                  {stats.open}
-                </strong>
+                <span>Currently open</span>
+                <strong>{stats.open}</strong>
               </div>
 
               <div className="tester-summary-row">
-                <span>
-                  In progress
-                </span>
-
-                <strong>
-                  {stats.inProgress}
-                </strong>
+                <span>In progress</span>
+                <strong>{stats.inProgress}</strong>
               </div>
 
               <div className="tester-summary-row">
-                <span>
-                  Resolved
-                </span>
-
-                <strong>
-                  {stats.resolved}
-                </strong>
+                <span>Resolved</span>
+                <strong>{stats.resolved}</strong>
               </div>
 
               <div className="tester-summary-row">
-                <span>
-                  Verified
-                </span>
-
-                <strong>
-                  {stats.verified}
-                </strong>
+                <span>Verified</span>
+                <strong>{stats.verified}</strong>
               </div>
 
             </div>
@@ -2899,7 +1965,6 @@ function TesterDashboard({
               className="dashboard-testing-action"
             >
               Raise or manage QA ticket
-
               <i className="bi bi-arrow-up-right" />
             </Link>
 
@@ -2919,6 +1984,79 @@ function TesterDashboard({
     </div>
   );
 }
+
+/* =========================================================
+   DEVELOPER STAT
+========================================================= */
+
+function DeveloperStat({
+  icon,
+  iconClass = '',
+  value,
+  label,
+  helper,
+  progress,
+}: {
+  icon: string;
+  iconClass?: string;
+  value: number;
+  label: string;
+  helper: string;
+  progress: number;
+}) {
+  return (
+    <div className="col-12 col-md-6 col-xl-3">
+
+      <div className="cardx dashboard-stat-card">
+
+        <div className="dashboard-stat-top">
+
+          <div
+            className={`stat-icon ${iconClass}`}
+          >
+            <i className={`bi ${icon}`} />
+          </div>
+
+          <span className="dashboard-stat-label">
+            My work
+          </span>
+
+        </div>
+
+        <div className="stat mt-3">
+          {value}
+        </div>
+
+        <div className="stat-label">
+          {label}
+        </div>
+
+        <div className="dashboard-mini-progress mt-3">
+
+          <span
+            style={{
+              width: `${Math.min(
+                100,
+                Math.max(0, progress),
+              )}%`,
+            }}
+          />
+
+        </div>
+
+        <small className="muted">
+          {helper}
+        </small>
+
+      </div>
+
+    </div>
+  );
+}
+
+/* =========================================================
+   TESTER STAT
+========================================================= */
 
 function TesterStat({
   icon,
@@ -2957,7 +2095,9 @@ function TesterStat({
         </div>
 
         <div className="stat mt-3">
+
           {value}
+
           {percentage && (
             <span
               style={{
@@ -2968,6 +2108,7 @@ function TesterStat({
               %
             </span>
           )}
+
         </div>
 
         <div className="stat-label">
@@ -2980,10 +2121,7 @@ function TesterStat({
             style={{
               width: `${Math.min(
                 100,
-                Math.max(
-                  0,
-                  progress,
-                ),
+                Math.max(0, progress),
               )}%`,
             }}
           />
@@ -3001,8 +2139,614 @@ function TesterStat({
 }
 
 /* =========================================================
-   STYLES
-   ========================================================= */
+   SECTION HEADER
+========================================================= */
+
+function DashboardSectionHeader({
+  kicker,
+  title,
+  description,
+  href,
+  linkText = 'View all',
+}: {
+  kicker: string;
+  title: string;
+  description?: string;
+  href?: string;
+  linkText?: string;
+}) {
+  return (
+    <div className="dashboard-section-header">
+
+      <div>
+
+        <div className="dashboard-section-kicker">
+          {kicker}
+        </div>
+
+        <h3 className="mb-1">
+          {title}
+        </h3>
+
+        {description && (
+          <p className="muted mb-0">
+            {description}
+          </p>
+        )}
+
+      </div>
+
+      {href && (
+        <Link
+          href={href}
+          className="dashboard-view-link"
+        >
+          {linkText}
+          <i className="bi bi-arrow-up-right ms-1" />
+        </Link>
+      )}
+
+    </div>
+  );
+}
+
+/* =========================================================
+   PROJECT ROW
+========================================================= */
+
+function ProjectRow({
+  project,
+  index,
+}: {
+  project: Project;
+  index: number;
+}) {
+  const progress = progressValue(
+    project.progress,
+  );
+
+  return (
+    <Link
+      href={`/projects/${project.id}`}
+      className="dashboard-project-row"
+      style={{
+        animationDelay:
+          `${index * 70}ms`,
+      }}
+    >
+
+      <div className="dashboard-project-number">
+        {String(index + 1).padStart(2, '0')}
+      </div>
+
+      <div className="dashboard-project-main">
+
+        <div className="dashboard-project-heading">
+
+          <div>
+            <strong>
+              {project.name}
+            </strong>
+
+            <span>
+              {project.type}
+
+              {project.client
+                ? ` · ${project.client}`
+                : ''}
+            </span>
+          </div>
+
+          <span
+            className={`badge-soft text-capitalize dashboard-project-status status-${project.status}`}
+          >
+            {statusLabel(project.status)}
+          </span>
+
+        </div>
+
+        <div className="dashboard-project-progress">
+
+          <div className="progress">
+
+            <div
+              className="progress-bar"
+              style={{
+                width: `${progress}%`,
+              }}
+            />
+
+          </div>
+
+          <strong>
+            {Math.round(progress)}%
+          </strong>
+
+        </div>
+
+      </div>
+
+      <i className="bi bi-chevron-right dashboard-project-arrow" />
+
+    </Link>
+  );
+}
+
+/* =========================================================
+   HEALTH
+========================================================= */
+
+function HealthOverview({
+  progress,
+  taskCompletion,
+  qaHealth,
+  activeProjects,
+}: {
+  progress: number;
+  taskCompletion: number;
+  qaHealth: number;
+  activeProjects: number;
+}) {
+  const degrees = progress * 3.6;
+
+  return (
+    <>
+      <div className="dashboard-health">
+
+        <div
+          className="dashboard-health-ring"
+          style={{
+            background:
+              `conic-gradient(
+                #7657e8 ${degrees}deg,
+                rgba(118,87,232,.08) ${degrees}deg
+              )`,
+          }}
+        >
+
+          <div>
+            <strong>{progress}%</strong>
+            <span>overall</span>
+          </div>
+
+        </div>
+
+        <div className="dashboard-health-copy">
+
+          <strong>
+            Delivery health
+          </strong>
+
+          <p>
+            Your workspace is currently averaging{' '}
+            <b>{progress}%</b> progress across
+            visible projects.
+          </p>
+
+          <Link
+            href="/activity"
+            className="dashboard-text-link"
+          >
+            Inspect activity
+            <i className="bi bi-arrow-right ms-1" />
+          </Link>
+
+        </div>
+
+      </div>
+
+      <div className="dashboard-health-stats">
+
+        <div>
+          <span>
+            <i className="bi bi-check2-circle" />
+            Tasks done
+          </span>
+
+          <strong>
+            {taskCompletion}%
+          </strong>
+        </div>
+
+        <div>
+          <span>
+            <i className="bi bi-shield-check" />
+            QA health
+          </span>
+
+          <strong>
+            {qaHealth}%
+          </strong>
+        </div>
+
+        <div>
+          <span>
+            <i className="bi bi-lightning" />
+            Active projects
+          </span>
+
+          <strong>
+            {activeProjects}
+          </strong>
+        </div>
+
+      </div>
+    </>
+  );
+}
+
+/* =========================================================
+   TASK OVERVIEW
+========================================================= */
+
+function TaskOverview({
+  total,
+  todo,
+  inProgress,
+  review,
+  done,
+}: {
+  total: number;
+  todo: number;
+  inProgress: number;
+  review: number;
+  done: number;
+}) {
+  return (
+    <div className="dashboard-task-chart">
+
+      <div className="dashboard-task-donut">
+
+        <div>
+          <strong>{total}</strong>
+          <span>total</span>
+        </div>
+
+      </div>
+
+      <div className="dashboard-task-legend">
+
+        <TaskLegend
+          label="To do"
+          value={todo}
+          className="todo"
+        />
+
+        <TaskLegend
+          label="In progress"
+          value={inProgress}
+          className="progress"
+        />
+
+        <TaskLegend
+          label="Review"
+          value={review}
+          className="review"
+        />
+
+        <TaskLegend
+          label="Done"
+          value={done}
+          className="done"
+        />
+
+      </div>
+
+    </div>
+  );
+}
+
+function TaskLegend({
+  label,
+  value,
+  className,
+}: {
+  label: string;
+  value: number;
+  className: string;
+}) {
+  return (
+    <div>
+
+      <span>
+        <i
+          className={`legend-dot ${className}`}
+        />
+        {label}
+      </span>
+
+      <strong>{value}</strong>
+
+    </div>
+  );
+}
+
+/* =========================================================
+   QA
+========================================================= */
+
+function QAOverview({
+  health,
+  open,
+  inProgress,
+  resolved,
+}: {
+  health: number;
+  open: number;
+  inProgress: number;
+  resolved: number;
+}) {
+  return (
+    <div className="dashboard-qa-grid">
+
+      <div className="dashboard-qa-main">
+
+        <div className="dashboard-qa-number">
+          {health}
+          <span>%</span>
+        </div>
+
+        <div className="progress mt-2">
+
+          <div
+            className="progress-bar"
+            style={{
+              width: `${health}%`,
+            }}
+          />
+
+        </div>
+
+        <small className="muted">
+          Resolved, closed or verified tickets
+        </small>
+
+      </div>
+
+      <div className="dashboard-qa-items">
+
+        <div>
+          <span>
+            <i className="bi bi-exclamation-circle" />
+            Open
+          </span>
+
+          <strong>{open}</strong>
+        </div>
+
+        <div>
+          <span>
+            <i className="bi bi-arrow-repeat" />
+            In progress
+          </span>
+
+          <strong>{inProgress}</strong>
+        </div>
+
+        <div>
+          <span>
+            <i className="bi bi-check2" />
+            Resolved
+          </span>
+
+          <strong>{resolved}</strong>
+        </div>
+
+      </div>
+
+    </div>
+  );
+}
+
+/* =========================================================
+   ACTIVITY
+========================================================= */
+
+function ActivityRow({
+  item,
+  index,
+}: {
+  item: ActivityItem;
+  index: number;
+}) {
+  const icon =
+    item.type === 'project'
+      ? 'bi-kanban'
+      : item.type === 'task'
+        ? 'bi-check2-square'
+        : item.type === 'ticket'
+          ? 'bi-bug'
+          : 'bi-journal-text';
+
+  return (
+    <div
+      className="dashboard-activity-item"
+      style={{
+        animationDelay:
+          `${index * 60}ms`,
+      }}
+    >
+
+      <div
+        className={`dashboard-activity-icon ${item.type}`}
+      >
+        <i className={`bi ${icon}`} />
+      </div>
+
+      <div className="dashboard-activity-body">
+
+        <div className="dashboard-activity-title">
+
+          <strong>
+            {item.title}
+          </strong>
+
+          <span>
+            {formatDate(item.createdAt)}
+          </span>
+
+        </div>
+
+        <p>
+          {item.description}
+        </p>
+
+        <div className="dashboard-activity-meta">
+
+          {item.projectName && (
+            <span>
+              <i className="bi bi-folder2" />
+              {item.projectName}
+            </span>
+          )}
+
+          {item.person && (
+            <span>
+              <i className="bi bi-person" />
+              {item.person}
+            </span>
+          )}
+
+        </div>
+
+      </div>
+
+    </div>
+  );
+}
+
+/* =========================================================
+   QUICK ACTION
+========================================================= */
+
+function DashboardAction({
+  href,
+  icon,
+  iconClass,
+  title,
+  description,
+}: {
+  href: string;
+  icon: string;
+  iconClass: string;
+  title: string;
+  description: string;
+}) {
+  return (
+    <Link
+      href={href}
+      className="dashboard-action"
+    >
+
+      <div
+        className={`dashboard-action-icon ${iconClass}`}
+      >
+        <i className={`bi ${icon}`} />
+      </div>
+
+      <div>
+
+        <strong>{title}</strong>
+
+        <span>{description}</span>
+
+      </div>
+
+      <i className="bi bi-arrow-up-right" />
+
+    </Link>
+  );
+}
+
+/* =========================================================
+   EMPTY
+========================================================= */
+
+function DashboardEmpty({
+  icon,
+  title,
+  description,
+  href,
+  action,
+}: {
+  icon: string;
+  title: string;
+  description: string;
+  href?: string;
+  action?: string;
+}) {
+  return (
+    <div className="dashboard-empty">
+
+      <div className="empty-state-icon">
+        <i className={`bi ${icon}`} />
+      </div>
+
+      <strong>{title}</strong>
+
+      <p className="muted mb-3">
+        {description}
+      </p>
+
+      {href && action && (
+        <Link
+          href={href}
+          className="btn btn-dark btn-sm"
+        >
+          {action}
+        </Link>
+      )}
+
+    </div>
+  );
+}
+
+/* =========================================================
+   FOOTER
+========================================================= */
+
+function DashboardFooter({
+  refreshing,
+  onRefresh,
+}: {
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="dashboard-footer mt-4">
+
+      <span>
+        Workspace synced from Firebase
+      </span>
+
+      <button
+        type="button"
+        className="dashboard-refresh"
+        onClick={onRefresh}
+        disabled={refreshing}
+      >
+
+        <i
+          className={`bi ${
+            refreshing
+              ? 'bi-arrow-repeat spin'
+              : 'bi-arrow-clockwise'
+          }`}
+        />
+
+        {refreshing
+          ? 'Refreshing...'
+          : 'Refresh'}
+
+      </button>
+
+    </div>
+  );
+}
+
+/* =========================================================
+   DEVELOPER / TESTER STYLES
+========================================================= */
 
 function DeveloperTesterStyles() {
   return (
@@ -3212,7 +2956,9 @@ function DeveloperTesterStyles() {
         text-decoration: none;
         font-size: 9px;
         font-weight: 700;
-        transition: transform .18s ease, background .18s ease;
+        transition:
+          transform .18s ease,
+          background .18s ease;
       }
 
       .dashboard-testing-action:hover {
@@ -3235,19 +2981,13 @@ function DeveloperTesterStyles() {
           width: 100%;
         }
       }
-
-      @media (prefers-reduced-motion: reduce) {
-        .dashboard-personal-row {
-          transition: none;
-        }
-      }
     `}</style>
   );
 }
 
 /* =========================================================
    ADMIN STYLES
-   ========================================================= */
+========================================================= */
 
 function DashboardStyles() {
   return (
@@ -3279,7 +3019,7 @@ function DashboardStyles() {
         align-items: center;
         gap: 9px;
         margin-bottom: 17px;
-        color: rgba(255, 255, 255, .64);
+        color: rgba(255,255,255,.64);
         font-size: 10px;
         font-weight: 700;
         letter-spacing: .14em;
@@ -3300,7 +3040,7 @@ function DashboardStyles() {
       .dashboard-hero p {
         max-width: 570px;
         margin: 18px 0 0;
-        color: rgba(255, 255, 255, .67);
+        color: rgba(255,255,255,.67);
         font-size: 14px;
         line-height: 1.7;
       }
@@ -3310,24 +3050,15 @@ function DashboardStyles() {
         background: #fff !important;
         border: 0 !important;
         padding: 10px 15px;
-        box-shadow: 0 10px 25px rgba(0, 0, 0, .13);
-      }
-
-      .dashboard-hero-btn:hover {
-        color: #172554 !important;
-        background: #fff !important;
+        box-shadow: 0 10px 25px rgba(0,0,0,.13);
       }
 
       .dashboard-hero-btn-secondary {
-        color: rgba(255, 255, 255, .90) !important;
-        background: rgba(255, 255, 255, .08) !important;
-        border: 1px solid rgba(255, 255, 255, .14) !important;
+        color: rgba(255,255,255,.90) !important;
+        background: rgba(255,255,255,.08) !important;
+        border: 1px solid rgba(255,255,255,.14) !important;
         backdrop-filter: blur(12px);
         -webkit-backdrop-filter: blur(12px);
-      }
-
-      .dashboard-hero-btn-secondary:hover {
-        background: rgba(255, 255, 255, .13) !important;
       }
 
       .dashboard-orbit {
@@ -3342,7 +3073,7 @@ function DashboardStyles() {
         position: absolute;
         left: 50%;
         top: 50%;
-        border: 1px solid rgba(255, 255, 255, .12);
+        border: 1px solid rgba(255,255,255,.12);
         border-radius: 50%;
         transform: translate(-50%, -50%);
       }
@@ -3356,7 +3087,7 @@ function DashboardStyles() {
       .ring-two {
         width: 140px;
         height: 140px;
-        border-color: rgba(212, 175, 90, .18);
+        border-color: rgba(212,175,90,.18);
         animation: orbit-spin-reverse 13s linear infinite;
       }
 
@@ -3370,25 +3101,24 @@ function DashboardStyles() {
         flex-direction: column;
         align-items: center;
         justify-content: center;
-        transform: translate(-50%, -50%);
+        transform: translate(-50%,-50%);
         border-radius: 50%;
         background:
           radial-gradient(
             circle at 35% 25%,
-            rgba(255, 255, 255, .17),
+            rgba(255,255,255,.17),
             transparent 40%
           ),
-          rgba(255, 255, 255, .075);
-        border: 1px solid rgba(255, 255, 255, .14);
+          rgba(255,255,255,.075);
+        border: 1px solid rgba(255,255,255,.14);
         box-shadow:
-          0 20px 45px rgba(0, 0, 0, .15),
-          inset 0 1px 0 rgba(255, 255, 255, .12);
+          0 20px 45px rgba(0,0,0,.15),
+          inset 0 1px 0 rgba(255,255,255,.12);
         backdrop-filter: blur(16px);
-        -webkit-backdrop-filter: blur(16px);
       }
 
       .dashboard-orbit-core span {
-        color: rgba(255, 255, 255, .48);
+        color: rgba(255,255,255,.48);
         font-size: 8px;
         font-weight: 700;
         letter-spacing: .1em;
@@ -3403,7 +3133,7 @@ function DashboardStyles() {
       }
 
       .dashboard-orbit-core small {
-        color: rgba(255, 255, 255, .43);
+        color: rgba(255,255,255,.43);
         font-size: 7px;
       }
 
@@ -3413,13 +3143,12 @@ function DashboardStyles() {
         align-items: center;
         gap: 8px;
         padding: 8px 10px;
-        border: 1px solid rgba(255, 255, 255, .12);
+        border: 1px solid rgba(255,255,255,.12);
         border-radius: 12px;
         color: #fff;
-        background: rgba(255, 255, 255, .075);
-        box-shadow: 0 12px 30px rgba(0, 0, 0, .14);
+        background: rgba(255,255,255,.075);
+        box-shadow: 0 12px 30px rgba(0,0,0,.14);
         backdrop-filter: blur(16px);
-        -webkit-backdrop-filter: blur(16px);
         animation: float-card 4s ease-in-out infinite;
       }
 
@@ -3437,7 +3166,7 @@ function DashboardStyles() {
       .dashboard-floating-card span {
         display: block;
         margin-top: 2px;
-        color: rgba(255, 255, 255, .43);
+        color: rgba(255,255,255,.43);
         font-size: 7px;
         text-transform: uppercase;
       }
@@ -3464,36 +3193,6 @@ function DashboardStyles() {
         justify-content: space-between;
       }
 
-      .stat-icon.purple {
-        color: #7657e8;
-        background:
-          linear-gradient(
-            135deg,
-            rgba(118, 87, 232, .10),
-            rgba(118, 87, 232, .15)
-          );
-      }
-
-      .stat-icon.gold {
-        color: #ad7c24;
-        background:
-          linear-gradient(
-            135deg,
-            rgba(212, 175, 90, .11),
-            rgba(212, 175, 90, .18)
-          );
-      }
-
-      .stat-icon.green {
-        color: #16834c;
-        background:
-          linear-gradient(
-            135deg,
-            rgba(22, 131, 76, .08),
-            rgba(22, 131, 76, .13)
-          );
-      }
-
       .dashboard-stat-label {
         color: var(--muted);
         font-size: 9px;
@@ -3504,7 +3203,7 @@ function DashboardStyles() {
         height: 4px;
         overflow: hidden;
         margin-bottom: 6px;
-        background: rgba(49, 85, 217, .07);
+        background: rgba(49,85,217,.07);
         border-radius: 99px;
       }
 
@@ -3512,12 +3211,11 @@ function DashboardStyles() {
         display: block;
         height: 100%;
         border-radius: inherit;
-        background:
-          linear-gradient(
-            90deg,
-            #3155d9,
-            #7657e8
-          );
+        background: linear-gradient(
+          90deg,
+          #3155d9,
+          #7657e8
+        );
         transition: width 700ms ease;
       }
 
@@ -3555,11 +3253,6 @@ function DashboardStyles() {
         white-space: nowrap;
       }
 
-      .dashboard-view-link:hover,
-      .dashboard-text-link:hover {
-        color: #7657e8;
-      }
-
       .dashboard-project-list {
         display: flex;
         flex-direction: column;
@@ -3586,8 +3279,8 @@ function DashboardStyles() {
         background:
           linear-gradient(
             135deg,
-            rgba(49, 85, 217, .035),
-            rgba(118, 87, 232, .045)
+            rgba(49,85,217,.035),
+            rgba(118,87,232,.045)
           );
         transform: translateX(3px);
       }
@@ -3713,7 +3406,7 @@ function DashboardStyles() {
 
       .dashboard-health-stats {
         display: grid;
-        grid-template-columns: repeat(3, 1fr);
+        grid-template-columns: repeat(3,1fr);
         border-top: 1px solid var(--line);
         padding-top: 17px;
       }
@@ -3931,22 +3624,22 @@ function DashboardStyles() {
 
       .dashboard-activity-icon.project {
         color: #3155d9;
-        background: rgba(49, 85, 217, .08);
+        background: rgba(49,85,217,.08);
       }
 
       .dashboard-activity-icon.task {
         color: #7657e8;
-        background: rgba(118, 87, 232, .09);
+        background: rgba(118,87,232,.09);
       }
 
       .dashboard-activity-icon.ticket {
         color: #b88a2e;
-        background: rgba(212, 175, 90, .11);
+        background: rgba(212,175,90,.11);
       }
 
       .dashboard-activity-icon.update {
         color: #172554;
-        background: rgba(23, 37, 84, .07);
+        background: rgba(23,37,84,.07);
       }
 
       .dashboard-activity-body {
@@ -4026,10 +3719,10 @@ function DashboardStyles() {
         background:
           linear-gradient(
             135deg,
-            rgba(49, 85, 217, .035),
-            rgba(118, 87, 232, .05)
+            rgba(49,85,217,.035),
+            rgba(118,87,232,.05)
           );
-        border-color: rgba(49, 85, 217, .07);
+        border-color: rgba(49,85,217,.07);
         transform: translateX(3px);
       }
 
@@ -4045,22 +3738,22 @@ function DashboardStyles() {
 
       .dashboard-action-icon.blue {
         color: #3155d9;
-        background: rgba(49, 85, 217, .09);
+        background: rgba(49,85,217,.09);
       }
 
       .dashboard-action-icon.purple {
         color: #7657e8;
-        background: rgba(118, 87, 232, .10);
+        background: rgba(118,87,232,.10);
       }
 
       .dashboard-action-icon.gold {
         color: #ad7c24;
-        background: rgba(212, 175, 90, .12);
+        background: rgba(212,175,90,.12);
       }
 
       .dashboard-action-icon.navy {
         color: #172554;
-        background: rgba(23, 37, 84, .07);
+        background: rgba(23,37,84,.07);
       }
 
       .dashboard-action > div:nth-child(2) {
@@ -4108,8 +3801,8 @@ function DashboardStyles() {
 
       .dashboard-alert {
         color: #7c3b25;
-        background: rgba(255, 246, 238, .80);
-        border: 1px solid rgba(212, 157, 111, .20);
+        background: rgba(255,246,238,.80);
+        border: 1px solid rgba(212,157,111,.20);
         border-radius: 13px;
       }
 
@@ -4136,7 +3829,7 @@ function DashboardStyles() {
 
       .dashboard-refresh:hover {
         color: #3155d9;
-        background: rgba(49, 85, 217, .05);
+        background: rgba(49,85,217,.05);
       }
 
       .dashboard-refresh:disabled {
@@ -4166,8 +3859,7 @@ function DashboardStyles() {
       }
 
       @keyframes float-card {
-        0%,
-        100% {
+        0%,100% {
           transform: translateY(0);
         }
 
@@ -4178,21 +3870,21 @@ function DashboardStyles() {
 
       @keyframes orbit-spin {
         from {
-          transform: translate(-50%, -50%) rotate(0deg);
+          transform: translate(-50%,-50%) rotate(0deg);
         }
 
         to {
-          transform: translate(-50%, -50%) rotate(360deg);
+          transform: translate(-50%,-50%) rotate(360deg);
         }
       }
 
       @keyframes orbit-spin-reverse {
         from {
-          transform: translate(-50%, -50%) rotate(360deg);
+          transform: translate(-50%,-50%) rotate(360deg);
         }
 
         to {
-          transform: translate(-50%, -50%) rotate(0deg);
+          transform: translate(-50%,-50%) rotate(0deg);
         }
       }
 

@@ -10,6 +10,7 @@ import {
   listUsers,
   updateTicket,
 } from '@/lib/firestore';
+
 import { useAuth } from '@/components/AuthProvider';
 
 import type {
@@ -19,12 +20,17 @@ import type {
   Priority,
 } from '@/lib/types';
 
+
+/* =========================================================
+   CONSTANTS
+========================================================= */
+
 const statuses: Ticket['status'][] = [
   'open',
   'in-progress',
   'resolved',
-  'closed',
   'verified',
+  'closed',
 ];
 
 const priorities: Priority[] = [
@@ -34,13 +40,33 @@ const priorities: Priority[] = [
   'critical',
 ];
 
-function statusLabel(status: Ticket['status']) {
+
+/* =========================================================
+   HELPERS
+========================================================= */
+
+function statusLabel(
+  status: Ticket['status'],
+) {
   return status
     .replace('-', ' ')
-    .replace(/\b\w/g, (char) => char.toUpperCase());
+    .replace(/\b\w/g, (char) =>
+      char.toUpperCase(),
+    );
 }
 
-function priorityClass(priority: Priority) {
+function priorityLabel(
+  priority: Priority,
+) {
+  return (
+    priority.charAt(0).toUpperCase() +
+    priority.slice(1)
+  );
+}
+
+function priorityClass(
+  priority: Priority,
+) {
   switch (priority) {
     case 'critical':
       return 'priority-critical';
@@ -56,7 +82,9 @@ function priorityClass(priority: Priority) {
   }
 }
 
-function statusClass(status: Ticket['status']) {
+function statusClass(
+  status: Ticket['status'],
+) {
   switch (status) {
     case 'open':
       return 'ticket-open';
@@ -78,36 +106,108 @@ function statusClass(status: Ticket['status']) {
   }
 }
 
+
+/**
+ * Developers should only move tickets through
+ * the development part of the workflow.
+ *
+ * Admins can use all statuses.
+ */
+function developerStatuses(
+  current: Ticket['status'],
+): Ticket['status'][] {
+  switch (current) {
+    case 'open':
+      return ['open', 'in-progress'];
+
+    case 'in-progress':
+      return ['in-progress', 'resolved'];
+
+    case 'resolved':
+      return ['resolved'];
+
+    case 'verified':
+      return ['verified'];
+
+    case 'closed':
+      return ['closed'];
+
+    default:
+      return [current];
+  }
+}
+
+
+/* =========================================================
+   SKELETON
+========================================================= */
+
 function TicketSkeleton() {
   return (
     <div className="ticket-skeleton">
       <div className="skeleton skeleton-title" />
+
       <div className="skeleton skeleton-line" />
+
       <div className="skeleton skeleton-line short" />
     </div>
   );
 }
 
+
+/* =========================================================
+   PAGE
+========================================================= */
+
 export default function Tickets() {
   const { profile } = useAuth();
 
-  const [tickets, setTickets] = useState<Ticket[]>([]);
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [devs, setDevs] = useState<Profile[]>([]);
+  const [tickets, setTickets] =
+    useState<Ticket[]>([]);
 
-  const [title, setTitle] = useState('');
-  const [desc, setDesc] = useState('');
-  const [projectId, setProjectId] = useState('');
+  const [projects, setProjects] =
+    useState<Project[]>([]);
+
+  const [devs, setDevs] =
+    useState<Profile[]>([]);
+
+  const [title, setTitle] =
+    useState('');
+
+  const [desc, setDesc] =
+    useState('');
+
+  const [projectId, setProjectId] =
+    useState('');
+
   const [priority, setPriority] =
     useState<Priority>('medium');
-  const [developerId, setDeveloperId] = useState('');
 
-  const [loading, setLoading] = useState(true);
-  const [submitting, setSubmitting] = useState(false);
-  const [updating, setUpdating] = useState<string | null>(null);
-  const [error, setError] = useState('');
+  const [developerId, setDeveloperId] =
+    useState('');
+
+  const [loading, setLoading] =
+    useState(true);
+
+  const [submitting, setSubmitting] =
+    useState(false);
+
+  const [updating, setUpdating] =
+    useState<string | null>(null);
+
+  const [error, setError] =
+    useState('');
+
+
+  /* =======================================================
+     LOAD
+  ======================================================= */
 
   async function load() {
+    if (!profile) {
+      return;
+    }
+
     try {
       setLoading(true);
       setError('');
@@ -123,6 +223,7 @@ export default function Tickets() {
       ]);
 
       setTickets(ticketData);
+
       setProjects(projectData);
 
       setDevs(
@@ -133,7 +234,11 @@ export default function Tickets() {
         ),
       );
     } catch (err) {
-      console.error(err);
+      console.error(
+        'Failed to load tickets:',
+        err,
+      );
+
       setError(
         'Unable to load QA tickets. Please try again.',
       );
@@ -142,43 +247,56 @@ export default function Tickets() {
     }
   }
 
-  useEffect(() => {
-    load();
-  }, []);
 
-  /*
-   * Only active projects are available for QA tickets.
-   *
-   * This prevents testers from raising tickets against
-   * projects that have not started or are already completed.
-   */
+  useEffect(() => {
+    if (profile) {
+      load();
+    }
+  }, [profile?.uid, profile?.role]);
+
+
+  /* =======================================================
+     AVAILABLE PROJECTS
+  ======================================================= */
+
   const availableProjects = useMemo(
     () =>
       projects.filter(
-        (project) => project.status === 'active',
+        (project) =>
+          project.status === 'active',
       ),
     [projects],
   );
 
+
+  /* =======================================================
+     METRICS
+  ======================================================= */
+
   const ticketStats = useMemo(() => {
     const open = tickets.filter(
-      (ticket) => ticket.status === 'open',
+      (ticket) =>
+        ticket.status === 'open',
     ).length;
 
     const inProgress = tickets.filter(
-      (ticket) => ticket.status === 'in-progress',
+      (ticket) =>
+        ticket.status === 'in-progress',
     ).length;
 
     const resolved = tickets.filter(
-      (ticket) => ticket.status === 'resolved',
+      (ticket) =>
+        ticket.status === 'resolved',
     ).length;
 
     const critical = tickets.filter(
-      (ticket) => ticket.priority === 'critical',
+      (ticket) =>
+        ticket.priority === 'critical',
     ).length;
 
     const verified = tickets.filter(
-      (ticket) => ticket.status === 'verified',
+      (ticket) =>
+        ticket.status === 'verified',
     ).length;
 
     return {
@@ -191,45 +309,75 @@ export default function Tickets() {
     };
   }, [tickets]);
 
-  async function raise(e: React.FormEvent) {
+
+  /* =======================================================
+     RAISE TICKET
+  ======================================================= */
+
+  async function raise(
+    e: React.FormEvent,
+  ) {
     e.preventDefault();
 
     if (!profile) {
       setError(
         'You must be logged in to raise a ticket.',
       );
+
+      return;
+    }
+
+    if (profile.role !== 'tester') {
+      setError(
+        'Only testers can raise QA tickets.',
+      );
+
       return;
     }
 
     if (!projectId) {
-      setError('Please select an active project.');
+      setError(
+        'Please select an active project.',
+      );
+
       return;
     }
 
     if (!title.trim()) {
-      setError('Please enter a ticket title.');
+      setError(
+        'Please enter a ticket title.',
+      );
+
       return;
     }
 
     if (!desc.trim()) {
-      setError('Please describe the issue.');
+      setError(
+        'Please describe the issue.',
+      );
+
       return;
     }
 
-    const project = availableProjects.find(
-      (item) => item.id === projectId,
-    );
+    const project =
+      availableProjects.find(
+        (item) =>
+          item.id === projectId,
+      );
 
     if (!project) {
       setError(
         'The selected project is not currently available for QA.',
       );
+
       return;
     }
 
-    const developer = devs.find(
-      (item) => item.uid === developerId,
-    );
+    const developer =
+      devs.find(
+        (item) =>
+          item.uid === developerId,
+      );
 
     try {
       setSubmitting(true);
@@ -237,16 +385,25 @@ export default function Tickets() {
 
       await createTicket({
         title: title.trim(),
+
         description: desc.trim(),
 
         projectId,
-        projectName: project.name,
 
-        testerId: profile.uid,
-        testerName: profile.name,
+        projectName:
+          project.name,
 
-        developerId: developer?.uid,
-        developerName: developer?.name,
+        testerId:
+          profile.uid,
+
+        testerName:
+          profile.name,
+
+        developerId:
+          developer?.uid,
+
+        developerName:
+          developer?.name,
 
         priority,
 
@@ -261,7 +418,11 @@ export default function Tickets() {
 
       await load();
     } catch (err) {
-      console.error(err);
+      console.error(
+        'Failed to create ticket:',
+        err,
+      );
+
       setError(
         'Unable to create the ticket. Please try again.',
       );
@@ -269,6 +430,11 @@ export default function Tickets() {
       setSubmitting(false);
     }
   }
+
+
+  /* =======================================================
+     CHANGE STATUS
+  ======================================================= */
 
   async function changeStatus(
     ticketId: string,
@@ -278,13 +444,20 @@ export default function Tickets() {
       setUpdating(ticketId);
       setError('');
 
-      await updateTicket(ticketId, {
-        status,
-      });
+      await updateTicket(
+        ticketId,
+        {
+          status,
+        },
+      );
 
       await load();
     } catch (err) {
-      console.error(err);
+      console.error(
+        'Failed to update ticket:',
+        err,
+      );
+
       setError(
         'Unable to update the ticket status.',
       );
@@ -293,34 +466,60 @@ export default function Tickets() {
     }
   }
 
+
+  /* =======================================================
+     RENDER
+  ======================================================= */
+
   return (
     <AppShell>
+
       <div className="tickets-page">
 
-        {/* HEADER */}
+        {/* =================================================
+            HEADER
+        ================================================= */}
+
         <div className="tickets-header">
 
           <div>
+
             <div className="page-eyebrow">
               <i className="bi bi-bug" />
+
               QUALITY ASSURANCE
             </div>
 
-            <h2>QA Tickets</h2>
+            <h2>
+              {profile?.role === 'admin'
+                ? 'QA Tickets'
+                : profile?.role === 'tester'
+                  ? 'My QA Tickets'
+                  : 'My Tickets'}
+            </h2>
 
             <p className="muted mb-0">
-              Raise issues against active projects and
-              track them through development, resolution,
-              and verification.
+              {profile?.role === 'admin'
+                ? 'Manage QA issues across the entire workspace.'
+                : profile?.role === 'tester'
+                  ? 'Raise issues, track fixes, and verify resolved tickets.'
+                  : 'Track and resolve QA issues assigned to you.'}
             </p>
+
           </div>
+
 
           {profile?.role === 'tester' && (
             <div className="qa-status">
+
               <i className="bi bi-shield-check" />
 
               <div>
-                <strong>QA workspace</strong>
+
+                <strong>
+                  QA workspace
+                </strong>
+
                 <span>
                   {availableProjects.length}{' '}
                   active{' '}
@@ -328,27 +527,39 @@ export default function Tickets() {
                     ? 'project'
                     : 'projects'}
                 </span>
+
               </div>
+
             </div>
           )}
 
         </div>
 
-        {/* ERROR */}
+
+        {/* =================================================
+            ERROR
+        ================================================= */}
+
         {error && (
           <div
             className="alert alert-danger ticket-alert"
             role="alert"
           >
             <i className="bi bi-exclamation-circle me-2" />
+
             {error}
           </div>
         )}
 
-        {/* METRICS */}
+
+        {/* =================================================
+            METRICS
+        ================================================= */}
+
         <div className="row g-3 mb-4">
 
           <div className="col-6 col-xl-3">
+
             <div className="cardx ticket-stat">
 
               <div className="stat-icon">
@@ -356,14 +567,24 @@ export default function Tickets() {
               </div>
 
               <div>
-                <span>Total tickets</span>
-                <strong>{ticketStats.total}</strong>
+
+                <span>
+                  Total tickets
+                </span>
+
+                <strong>
+                  {ticketStats.total}
+                </strong>
+
               </div>
 
             </div>
+
           </div>
 
+
           <div className="col-6 col-xl-3">
+
             <div className="cardx ticket-stat">
 
               <div className="stat-icon open">
@@ -371,14 +592,24 @@ export default function Tickets() {
               </div>
 
               <div>
-                <span>Open</span>
-                <strong>{ticketStats.open}</strong>
+
+                <span>
+                  Open
+                </span>
+
+                <strong>
+                  {ticketStats.open}
+                </strong>
+
               </div>
 
             </div>
+
           </div>
 
+
           <div className="col-6 col-xl-3">
+
             <div className="cardx ticket-stat">
 
               <div className="stat-icon progress">
@@ -386,14 +617,24 @@ export default function Tickets() {
               </div>
 
               <div>
-                <span>In progress</span>
-                <strong>{ticketStats.inProgress}</strong>
+
+                <span>
+                  In progress
+                </span>
+
+                <strong>
+                  {ticketStats.inProgress}
+                </strong>
+
               </div>
 
             </div>
+
           </div>
 
+
           <div className="col-6 col-xl-3">
+
             <div className="cardx ticket-stat">
 
               <div className="stat-icon critical">
@@ -401,17 +642,30 @@ export default function Tickets() {
               </div>
 
               <div>
-                <span>Critical</span>
-                <strong>{ticketStats.critical}</strong>
+
+                <span>
+                  Critical
+                </span>
+
+                <strong>
+                  {ticketStats.critical}
+                </strong>
+
               </div>
 
             </div>
+
           </div>
 
         </div>
 
-        {/* RAISE TICKET */}
+
+        {/* =================================================
+            RAISE TICKET
+        ================================================= */}
+
         {profile?.role === 'tester' && (
+
           <div className="cardx raise-ticket-card mb-4">
 
             <div className="raise-ticket-header">
@@ -421,17 +675,23 @@ export default function Tickets() {
               </div>
 
               <div>
-                <h5>Raise a ticket</h5>
+
+                <h5>
+                  Raise a ticket
+                </h5>
 
                 <p className="muted mb-0">
-                  Report an issue found while testing
-                  an active project.
+                  Report an issue found while
+                  testing an active project.
                 </p>
+
               </div>
 
             </div>
 
+
             {availableProjects.length === 0 ? (
+
               <div className="no-projects">
 
                 <div className="no-projects-icon">
@@ -439,26 +699,31 @@ export default function Tickets() {
                 </div>
 
                 <div>
+
                   <strong>
                     No projects available for QA
                   </strong>
 
                   <p className="muted mb-0">
-                    Tickets can only be raised against
-                    projects that are currently active.
-                    Once a project becomes active, it
-                    will appear here.
+                    You currently have no active
+                    projects assigned to you for QA.
+                    Once a project is assigned to you,
+                    it will appear here.
                   </p>
+
                 </div>
 
               </div>
+
             ) : (
+
               <form
                 onSubmit={raise}
                 className="row g-3 mt-2"
               >
 
                 <div className="col-lg-6">
+
                   <label className="form-label">
                     Issue title
                   </label>
@@ -469,12 +734,17 @@ export default function Tickets() {
                     required
                     value={title}
                     onChange={(e) =>
-                      setTitle(e.target.value)
+                      setTitle(
+                        e.target.value,
+                      )
                     }
                   />
+
                 </div>
 
+
                 <div className="col-lg-3">
+
                   <label className="form-label">
                     Project
                   </label>
@@ -484,27 +754,36 @@ export default function Tickets() {
                     required
                     value={projectId}
                     onChange={(e) =>
-                      setProjectId(e.target.value)
+                      setProjectId(
+                        e.target.value,
+                      )
                     }
                   >
+
                     <option value="">
                       Select active project
                     </option>
 
                     {availableProjects.map(
                       (project) => (
+
                         <option
                           key={project.id}
                           value={project.id}
                         >
                           {project.name}
                         </option>
+
                       ),
                     )}
+
                   </select>
+
                 </div>
 
+
                 <div className="col-lg-3">
+
                   <label className="form-label">
                     Priority
                   </label>
@@ -514,25 +793,32 @@ export default function Tickets() {
                     value={priority}
                     onChange={(e) =>
                       setPriority(
-                        e.target.value as Priority,
+                        e.target
+                          .value as Priority,
                       )
                     }
                   >
-                    {priorities.map((item) => (
-                      <option
-                        key={item}
-                        value={item}
-                      >
-                        {item
-                          .charAt(0)
-                          .toUpperCase() +
-                          item.slice(1)}
-                      </option>
-                    ))}
+
+                    {priorities.map(
+                      (item) => (
+
+                        <option
+                          key={item}
+                          value={item}
+                        >
+                          {priorityLabel(item)}
+                        </option>
+
+                      ),
+                    )}
+
                   </select>
+
                 </div>
 
+
                 <div className="col-md-6">
+
                   <label className="form-label">
                     Assign developer
                   </label>
@@ -546,24 +832,34 @@ export default function Tickets() {
                       )
                     }
                   >
+
                     <option value="">
                       Unassigned
                     </option>
 
-                    {devs.map((developer) => (
-                      <option
-                        key={developer.uid}
-                        value={developer.uid}
-                      >
-                        {developer.name} (
-                        {developer.role})
-                      </option>
-                    ))}
+                    {devs.map(
+                      (developer) => (
+
+                        <option
+                          key={developer.uid}
+                          value={developer.uid}
+                        >
+                          {developer.name} (
+                          {developer.role})
+                        </option>
+
+                      ),
+                    )}
+
                   </select>
+
                 </div>
 
+
                 <div className="col-md-6">
+
                   <div className="ticket-form-hint">
+
                     <i className="bi bi-info-circle" />
 
                     <span>
@@ -572,10 +868,14 @@ export default function Tickets() {
                       behaviour, screenshots, or
                       relevant links.
                     </span>
+
                   </div>
+
                 </div>
 
+
                 <div className="col-12">
+
                   <label className="form-label">
                     Description
                   </label>
@@ -587,10 +887,14 @@ export default function Tickets() {
                     required
                     value={desc}
                     onChange={(e) =>
-                      setDesc(e.target.value)
+                      setDesc(
+                        e.target.value,
+                      )
                     }
                   />
+
                 </div>
+
 
                 <div className="col-12">
 
@@ -599,45 +903,64 @@ export default function Tickets() {
                     className="btn btn-dark"
                     disabled={submitting}
                   >
+
                     {submitting ? (
                       <>
                         <span
                           className="spinner-border spinner-border-sm me-2"
                           aria-hidden="true"
                         />
+
                         Submitting...
                       </>
                     ) : (
                       <>
                         <i className="bi bi-send me-2" />
+
                         Submit ticket
                       </>
                     )}
+
                   </button>
 
                 </div>
 
               </form>
+
             )}
 
           </div>
+
         )}
 
-        {/* TICKET LIST */}
+
+        {/* =================================================
+            TICKET LIST
+        ================================================= */}
+
         <div className="cardx tickets-list-card">
 
           <div className="tickets-list-header">
 
             <div>
-              <h5>Ticket queue</h5>
+
+              <h5>
+                Ticket queue
+              </h5>
 
               <p className="muted mb-0">
-                Track reported issues across the
-                workspace.
+                {profile?.role === 'admin'
+                  ? 'All reported QA issues across the workspace.'
+                  : profile?.role === 'tester'
+                    ? 'Issues you have reported and their current status.'
+                    : 'QA issues currently assigned to you.'}
               </p>
+
             </div>
 
+
             <div className="ticket-queue-summary">
+
               <span>
                 {ticketStats.resolved +
                   ticketStats.verified}{' '}
@@ -645,13 +968,17 @@ export default function Tickets() {
               </span>
 
               <span>
-                {ticketStats.verified} verified
+                {ticketStats.verified}{' '}
+                verified
               </span>
+
             </div>
 
           </div>
 
+
           {loading ? (
+
             <div className="ticket-list">
 
               <TicketSkeleton />
@@ -660,182 +987,311 @@ export default function Tickets() {
               <TicketSkeleton />
 
             </div>
+
           ) : tickets.length === 0 ? (
+
             <div className="tickets-empty">
 
               <div className="empty-icon">
                 <i className="bi bi-ticket-perforated" />
               </div>
 
-              <h5>No QA tickets yet</h5>
+              <h5>
+                No QA tickets yet
+              </h5>
 
               <p className="muted">
-                Reported issues will appear here once
-                testing begins.
+                {profile?.role === 'tester'
+                  ? 'Issues you report will appear here.'
+                  : 'Tickets assigned to you will appear here.'}
               </p>
 
             </div>
+
           ) : (
+
             <div className="ticket-list">
 
-              {tickets.map((ticket, index) => (
-                <div
-                  className="ticket-row"
-                  key={ticket.id}
-                  style={{
-                    animationDelay: `${index * 45}ms`,
-                  }}
-                >
+              {tickets.map(
+                (ticket, index) => (
 
                   <div
-                    className={`ticket-severity ${priorityClass(
-                      ticket.priority,
-                    )}`}
-                  />
+                    className="ticket-row"
+                    key={ticket.id}
+                    style={{
+                      animationDelay:
+                        `${index * 45}ms`,
+                    }}
+                  >
 
-                  <div className="ticket-main">
+                    <div
+                      className={`ticket-severity ${priorityClass(
+                        ticket.priority,
+                      )}`}
+                    />
 
-                    <div className="ticket-title-row">
 
-                      <div className="ticket-title">
-                        <strong>
-                          {ticket.title}
-                        </strong>
+                    <div className="ticket-main">
+
+                      <div className="ticket-title-row">
+
+                        <div className="ticket-title">
+
+                          <strong>
+                            {ticket.title}
+                          </strong>
+
+                          <span
+                            className={`priority-badge ${priorityClass(
+                              ticket.priority,
+                            )}`}
+                          >
+
+                            <i className="bi bi-flag-fill" />
+
+                            {ticket.priority}
+
+                          </span>
+
+                        </div>
+
 
                         <span
-                          className={`priority-badge ${priorityClass(
-                            ticket.priority,
+                          className={`ticket-status ${statusClass(
+                            ticket.status,
                           )}`}
                         >
-                          <i className="bi bi-flag-fill" />
-                          {ticket.priority}
+
+                          <i className="bi bi-circle-fill" />
+
+                          {statusLabel(
+                            ticket.status,
+                          )}
+
                         </span>
+
                       </div>
 
-                      <span
-                        className={`ticket-status ${statusClass(
-                          ticket.status,
-                        )}`}
-                      >
-                        <i className="bi bi-circle-fill" />
 
-                        {statusLabel(
-                          ticket.status,
-                        )}
-                      </span>
+                      <div className="ticket-description">
+                        {ticket.description}
+                      </div>
+
+
+                      <div className="ticket-meta">
+
+                        <span>
+
+                          <i className="bi bi-folder2-open" />
+
+                          {ticket.projectName ||
+                            'Unknown project'}
+
+                        </span>
+
+
+                        <span>
+
+                          <i className="bi bi-person" />
+
+                          {ticket.testerName ||
+                            'Unknown tester'}
+
+                        </span>
+
+
+                        <span>
+
+                          <i className="bi bi-code-slash" />
+
+                          {ticket.developerName ||
+                            'Unassigned'}
+
+                        </span>
+
+                      </div>
 
                     </div>
 
-                    <div className="ticket-description">
-                      {ticket.description}
-                    </div>
 
-                    <div className="ticket-meta">
+                    {/* =====================================
+                        ACTIONS
+                    ===================================== */}
 
-                      <span>
-                        <i className="bi bi-folder2-open" />
-                        {ticket.projectName ||
-                          'Unknown project'}
-                      </span>
+                    <div className="ticket-actions">
 
-                      <span>
-                        <i className="bi bi-person" />
-                        {ticket.testerName ||
-                          'Unknown tester'}
-                      </span>
+                      {/* ADMIN */}
+                      {profile?.role === 'admin' && (
 
-                      <span>
-                        <i className="bi bi-code-slash" />
-                        {ticket.developerName ||
-                          'Unassigned'}
-                      </span>
-
-                    </div>
-
-                  </div>
-
-                  <div className="ticket-actions">
-
-                    {(profile?.role === 'developer' ||
-                      profile?.role === 'admin') && (
-                      <select
-                        className="form-select ticket-status-select"
-                        value={ticket.status}
-                        disabled={
-                          updating === ticket.id
-                        }
-                        title="Update ticket status"
-                        data-bs-toggle="tooltip"
-                        onChange={(e) =>
-                          changeStatus(
-                            ticket.id,
-                            e.target
-                              .value as Ticket['status'],
-                          )
-                        }
-                      >
-                        {statuses.map((status) => (
-                          <option
-                            key={status}
-                            value={status}
-                          >
-                            {statusLabel(status)}
-                          </option>
-                        ))}
-                      </select>
-                    )}
-
-                    {profile?.role === 'tester' &&
-                      ticket.testerId ===
-                        profile.uid &&
-                      ticket.status ===
-                        'resolved' && (
-                        <button
-                          type="button"
-                          className="btn btn-outline-success btn-sm"
+                        <select
+                          className="form-select ticket-status-select"
+                          value={ticket.status}
                           disabled={
-                            updating === ticket.id
+                            updating ===
+                            ticket.id
                           }
-                          onClick={() =>
+                          title="Update ticket status"
+                          onChange={(e) =>
                             changeStatus(
                               ticket.id,
-                              'verified',
+                              e.target
+                                .value as Ticket['status'],
                             )
                           }
-                          title="Verify the fix"
-                          data-bs-toggle="tooltip"
                         >
-                          {updating ===
-                          ticket.id ? (
-                            <>
-                              <span
-                                className="spinner-border spinner-border-sm me-1"
-                                aria-hidden="true"
-                              />
-                              Verifying
-                            </>
-                          ) : (
-                            <>
-                              <i className="bi bi-check2-circle me-1" />
-                              Verify fix
-                            </>
+
+                          {statuses.map(
+                            (status) => (
+
+                              <option
+                                key={status}
+                                value={status}
+                              >
+                                {statusLabel(
+                                  status,
+                                )}
+                              </option>
+
+                            ),
                           )}
-                        </button>
+
+                        </select>
+
                       )}
+
+
+                      {/* DEVELOPER */}
+                      {profile?.role ===
+                        'developer' && (
+
+                        <select
+                          className="form-select ticket-status-select"
+                          value={ticket.status}
+                          disabled={
+                            updating ===
+                            ticket.id
+                          }
+                          title="Update ticket status"
+                          onChange={(e) =>
+                            changeStatus(
+                              ticket.id,
+                              e.target
+                                .value as Ticket['status'],
+                            )
+                          }
+                        >
+
+                          {developerStatuses(
+                            ticket.status,
+                          ).map(
+                            (status) => (
+
+                              <option
+                                key={status}
+                                value={status}
+                              >
+                                {statusLabel(
+                                  status,
+                                )}
+                              </option>
+
+                            ),
+                          )}
+
+                        </select>
+
+                      )}
+
+
+                      {/* TESTER */}
+                      {profile?.role ===
+                        'tester' &&
+                        ticket.testerId ===
+                          profile.uid &&
+                        ticket.status ===
+                          'resolved' && (
+
+                          <button
+                            type="button"
+                            className="btn btn-outline-success btn-sm"
+                            disabled={
+                              updating ===
+                              ticket.id
+                            }
+                            onClick={() =>
+                              changeStatus(
+                                ticket.id,
+                                'verified',
+                              )
+                            }
+                            title="Verify the fix"
+                          >
+
+                            {updating ===
+                            ticket.id ? (
+                              <>
+                                <span
+                                  className="spinner-border spinner-border-sm me-1"
+                                  aria-hidden="true"
+                                />
+
+                                Verifying
+                              </>
+                            ) : (
+                              <>
+                                <i className="bi bi-check2-circle me-1" />
+
+                                Verify fix
+                              </>
+                            )}
+
+                          </button>
+
+                        )}
+
+
+                      {/* TESTER — WAITING */}
+                      {profile?.role ===
+                        'tester' &&
+                        ticket.testerId ===
+                          profile.uid &&
+                        ticket.status !==
+                          'resolved' &&
+                        ticket.status !==
+                          'verified' &&
+                        ticket.status !==
+                          'closed' && (
+
+                          <span className="ticket-waiting">
+                            <i className="bi bi-hourglass-split" />
+
+                            Waiting for developer
+                          </span>
+
+                        )}
+
+                    </div>
 
                   </div>
 
-                </div>
-              ))}
+                ),
+              )}
 
             </div>
+
           )}
 
         </div>
 
       </div>
 
+
+      {/* ===================================================
+          STYLES
+      =================================================== */}
+
       <style jsx>{`
+
         .tickets-page {
           animation: pageIn 0.45s ease both;
         }
@@ -1275,6 +1731,18 @@ export default function Tickets() {
           font-size: 10px;
         }
 
+        .ticket-waiting {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          padding: 7px 9px;
+          border-radius: 7px;
+          background: #f7f5ef;
+          color: #999;
+          font-size: 9px;
+          white-space: nowrap;
+        }
+
         .tickets-empty {
           padding: 70px 20px;
           text-align: center;
@@ -1395,6 +1863,7 @@ export default function Tickets() {
         }
 
         @media (max-width: 900px) {
+
           .tickets-header {
             align-items: flex-start;
             flex-direction: column;
@@ -1413,9 +1882,11 @@ export default function Tickets() {
           .ticket-status {
             align-self: flex-start;
           }
+
         }
 
         @media (max-width: 700px) {
+
           .tickets-list-header {
             align-items: flex-start;
             flex-direction: column;
@@ -1448,9 +1919,11 @@ export default function Tickets() {
           .ticket-meta span {
             width: 100%;
           }
+
         }
 
         @media (max-width: 500px) {
+
           .ticket-row {
             gap: 9px;
           }
@@ -1463,9 +1936,11 @@ export default function Tickets() {
           .ticket-status-select {
             width: 100%;
           }
+
         }
 
         @media (prefers-reduced-motion: reduce) {
+
           .tickets-page,
           .ticket-stat,
           .raise-ticket-card,
@@ -1478,8 +1953,11 @@ export default function Tickets() {
             animation: none !important;
             transition: none !important;
           }
+
         }
+
       `}</style>
+
     </AppShell>
   );
 }
