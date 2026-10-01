@@ -5,50 +5,19 @@ require("dotenv").config({
       : ".env.local",
 });
 
-const readline = require("readline");
-const { initializeApp } = require("firebase/app");
-const {
-  getAuth,
-  signInWithEmailAndPassword,
-} = require("firebase/auth");
-const {
-  getFirestore,
-  collection,
-  addDoc,
-  serverTimestamp,
-} = require("firebase/firestore");
+const { initializeApp } = require("firebase-admin/app");
+const { getFirestore, FieldValue } = require("firebase-admin/firestore");
 
-const firebaseConfig = {
-  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
-};
+const projectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID;
 
-if (!firebaseConfig.projectId) {
-  console.error("ERROR: Firebase configuration is missing.");
+if (!projectId) {
+  console.error("ERROR: NEXT_PUBLIC_FIREBASE_PROJECT_ID is missing.");
   process.exit(1);
 }
 
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
+initializeApp({ projectId });
 
-function ask(question) {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-
-  return new Promise((resolve) => {
-    rl.question(question, (answer) => {
-      rl.close();
-      resolve(answer.trim());
-    });
-  });
-}
+const db = getFirestore();
 
 const phases = [
   {
@@ -212,29 +181,6 @@ const phases = [
 ];
 
 async function seed() {
-  console.log("\n========================================");
-  console.log("FIREBASE AUTHENTICATION");
-  console.log("========================================");
-
-  const email = await ask("Firebase email: ");
-  const password = await ask("Firebase password: ");
-
-  if (!email || !password) {
-    throw new Error("Email and password are required.");
-  }
-
-  const credential = await signInWithEmailAndPassword(
-    auth,
-    email,
-    password
-  );
-
-  const user = credential.user;
-
-  console.log(`Authenticated as: ${user.email}`);
-  console.log(`Firebase UID: ${user.uid}`);
-
-  console.log("\nCreating UFAA Power BI project...");
   console.log("");
   console.log("========================================");
   console.log("UFAA POWER BI FIREBASE SEED");
@@ -245,7 +191,7 @@ async function seed() {
 
   console.log("Creating UFAA Power BI project...");
 
-  const projectRef = await addDoc(collection(db, "projects"), {
+  const projectRef = await db.collection("projects").add({
     name: "UFAA Microsoft Power BI Enterprise Reporting & Analytics",
     client: "Unclaimed Financial Assets Authority (UFAA)",
     description:
@@ -256,10 +202,8 @@ async function seed() {
       "Microsoft Power BI, Business Central 24, Microsoft Entra ID",
     category: "Business Intelligence & Analytics",
     progress: 0,
-    ownerId: user.uid,
-    testerIds: [],
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
 
   console.log(`Project created: ${projectRef.id}`);
@@ -276,7 +220,7 @@ async function seed() {
     for (let taskIndex = 0; taskIndex < phase.tasks.length; taskIndex++) {
       const title = phase.tasks[taskIndex];
 
-      await addDoc(collection(db, "tasks"), {
+      await db.collection("tasks").add({
         projectId: projectRef.id,
         phase: phase.name,
         phaseOrder: phaseIndex + 1,
@@ -287,9 +231,8 @@ async function seed() {
         status: "Not Started",
         progress: 0,
         priority: "High",
-        assigneeId: user.uid,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
       });
 
       taskCount++;

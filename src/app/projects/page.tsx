@@ -4,65 +4,112 @@ import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 
 import AppShell from '@/components/AppShell';
+import { useAuth } from '@/components/AuthProvider';
+
 import {
   createProject,
   listProjects,
   listTasks,
 } from '@/lib/firestore';
-import { useAuth } from '@/components/AuthProvider';
+
+import { db } from '@/lib/firebase';
+
+import {
+  collection,
+  doc,
+  serverTimestamp,
+  writeBatch,
+} from 'firebase/firestore';
+
+import {
+  UFAA_PHASES,
+  UFAA_PROJECT,
+  UFAA_PROJECT_NAME,
+  UFAA_TASK_COUNT,
+} from '@/lib/ufaaSeed';
 
 import type { Project, Task } from '@/lib/types';
 
-function normalizeStatus(status?: string) {
-  return status?.toLowerCase().replace(/[\s_]+/g, '-') || 'planned';
+function normalizeStatus(status: string): Project['status'] {
+  const value = status.toLowerCase().trim();
+
+  if (value === 'active' || value === 'in progress') {
+    return 'active';
+  }
+
+  if (value === 'completed' || value === 'complete') {
+    return 'completed';
+  }
+
+  if (value === 'on-hold' || value === 'on hold') {
+    return 'on-hold';
+  }
+
+  return 'planned';
 }
 
-function getProjectStatusClass(status?: string) {
-  switch (normalizeStatus(status)) {
+function getProjectStatusClass(status: string) {
+  const normalized = normalizeStatus(status);
+
+  switch (normalized) {
     case 'active':
-      return 'project-active';
+      return 'status-active';
 
     case 'completed':
-      return 'project-completed';
+      return 'status-completed';
 
     case 'on-hold':
-      return 'project-hold';
+      return 'status-on-hold';
 
     default:
-      return 'project-planned';
+      return 'status-planned';
   }
 }
 
-function getProgress(tasks: Task[]) {
-  if (!tasks.length) return 0;
+function getPriorityClass(priority: string) {
+  switch (priority.toLowerCase()) {
+    case 'critical':
+      return 'priority-critical';
 
-  const completed = tasks.filter(
-    (task) => normalizeStatus(task.status) === 'done'
-  ).length;
+    case 'high':
+      return 'priority-high';
 
-  return Math.round((completed / tasks.length) * 100);
+    case 'medium':
+      return 'priority-medium';
+
+    default:
+      return 'priority-low';
+  }
 }
 
-function ProjectSkeleton() {
-  return (
-    <div className="project-skeleton">
-      <div className="skeleton skeleton-small" />
-      <div className="skeleton skeleton-heading" />
-      <div className="skeleton skeleton-line" />
-      <div className="skeleton skeleton-line short" />
-      <div className="skeleton skeleton-progress" />
-    </div>
+function getProgress(tasks: Task[], projectId: string) {
+  const projectTasks = tasks.filter(
+    (task) => task.projectId === projectId,
+  );
+
+  if (projectTasks.length === 0) {
+    return 0;
+  }
+
+  const completed = projectTasks.filter(
+    (task) => task.status === 'done',
+  ).length;
+
+  return Math.round(
+    (completed / projectTasks.length) * 100,
   );
 }
 
 export default function Projects() {
-  const { profile } = useAuth();
+  const { user, profile } = useAuth();
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [seeding, setSeeding] = useState(false);
+
   const [open, setOpen] = useState(false);
 
   const [name, setName] = useState('');
@@ -70,6 +117,8 @@ export default function Projects() {
   const [type, setType] = useState('Software Project');
   const [priority, setPriority] =
     useState<Project['priority']>('medium');
+
+  const [seedMessage, setSeedMessage] = useState('');
 
   async function load() {
     try {
@@ -83,7 +132,10 @@ export default function Projects() {
       setProjects(projectData);
       setTasks(taskData);
     } catch (error) {
-      console.error('Failed to load projects:', error);
+      console.error(
+        'Failed to load projects:',
+        error,
+      );
     } finally {
       setLoading(false);
     }
@@ -96,7 +148,9 @@ export default function Projects() {
   async function save(e: React.FormEvent) {
     e.preventDefault();
 
-    if (!profile || !name.trim()) return;
+    if (!profile || !name.trim()) {
+      return;
+    }
 
     try {
       setBusy(true);
@@ -121,609 +175,634 @@ export default function Projects() {
 
       await load();
     } catch (error) {
-      console.error('Failed to create project:', error);
+      console.error(
+        'Failed to create project:',
+        error,
+      );
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function seedUfaaProject() {
+    if (!user || !profile || !db) {
+      setSeedMessage(
+        'You must be logged in before seeding the project.',
+      );
+      return;
+    }
+
+    if (
+      profile.role !== 'admin' &&
+      profile.role !== 'developer'
+    ) {
+      setSeedMessage(
+        'Only an admin or developer can seed this project.',
+      );
+      return;
+    }
+
+    const alreadyExists = projects.some(
+      (project) =>
+        project.name === UFAA_PROJECT_NAME,
+    );
+
+    if (alreadyExists) {
+      setSeedMessage(
+        'The UFAA Power BI project already exists in your projects.',
+      );
+      return;
+    }
+
+    try {
+      setSeeding(true);
+      setSeedMessage(
+        'Preparing UFAA Power BI project...',
+      );
+
+      /*
+       * 1 project + 98 tasks = 99 Firestore writes.
+       *
+       * Firestore supports up to 500 writes in one batch,
+       * so everything can be committed atomically.
+       */
+
+      const batch = writeBatch(db);
+
+      const projectRef = doc(
+        collection(db, 'projects'),
+      );
+
+      batch.set(projectRef, {
+        name: UFAA_PROJECT.name,
+        client: UFAA_PROJECT.client,
+        description: UFAA_PROJECT.description,
+        type: UFAA_PROJECT.type,
+        status: UFAA_PROJECT.status,
+        priority: UFAA_PROJECT.priority,
+        progress: 0,
+        technologies: [
+          ...UFAA_PROJECT.technologies,
+        ],
+        ownerId: user.uid,
+        ownerName: profile.name,
+        testerIds: [],
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      let taskCount = 0;
+
+      for (
+        let phaseIndex = 0;
+        phaseIndex < UFAA_PHASES.length;
+        phaseIndex++
+      ) {
+        const phase = UFAA_PHASES[phaseIndex];
+
+        for (
+          let taskIndex = 0;
+          taskIndex < phase.tasks.length;
+          taskIndex++
+        ) {
+          const title =
+            phase.tasks[taskIndex];
+
+          const taskRef = doc(
+            collection(db, 'tasks'),
+          );
+
+          batch.set(taskRef, {
+            projectId: projectRef.id,
+            phase: phase.name,
+            phaseOrder: phaseIndex + 1,
+            taskOrder: taskIndex + 1,
+            title,
+            name: title,
+            description: title,
+            status: 'todo',
+            progress: 0,
+            priority: 'high',
+            assigneeId: user.uid,
+            assigneeName: profile.name,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+
+          taskCount++;
+
+          setSeedMessage(
+            `Preparing UFAA Power BI project... ${taskCount}/${UFAA_TASK_COUNT} tasks`,
+          );
+        }
+      }
+
+      setSeedMessage(
+        `Saving ${UFAA_TASK_COUNT} tasks to Firebase...`,
+      );
+
+      await batch.commit();
+
+      setSeedMessage(
+        `UFAA Power BI project created successfully — ${UFAA_TASK_COUNT} tasks.`,
+      );
+
+      await load();
+    } catch (error) {
+      console.error(
+        'UFAA seed failed:',
+        error,
+      );
+
+      setSeedMessage(
+        error instanceof Error
+          ? `Seed failed: ${error.message}`
+          : 'Seed failed. Check the browser console.',
+      );
+    } finally {
+      setSeeding(false);
     }
   }
 
   const projectStats = useMemo(() => {
     const active = projects.filter(
       (project) =>
-        normalizeStatus(project.status) === 'active'
-    ).length;
-
-    const planned = projects.filter(
-      (project) =>
-        normalizeStatus(project.status) === 'planned'
+        normalizeStatus(project.status) ===
+        'active',
     ).length;
 
     const completed = projects.filter(
       (project) =>
-        normalizeStatus(project.status) === 'completed'
+        normalizeStatus(project.status) ===
+        'completed',
     ).length;
 
-    const totalTasks = tasks.length;
-
-    const completedTasks = tasks.filter(
-      (task) =>
-        normalizeStatus(task.status) === 'done'
+    const onHold = projects.filter(
+      (project) =>
+        normalizeStatus(project.status) ===
+        'on-hold',
     ).length;
-
-    const overallProgress =
-      totalTasks > 0
-        ? Math.round(
-            (completedTasks / totalTasks) * 100
-          )
-        : 0;
 
     return {
       total: projects.length,
       active,
-      planned,
       completed,
-      totalTasks,
-      completedTasks,
-      overallProgress,
+      onHold,
     };
-  }, [projects, tasks]);
-
-  function getTasksForProject(projectId: string) {
-    return tasks.filter(
-      (task) => task.projectId === projectId
-    );
-  }
+  }, [projects]);
 
   return (
     <AppShell>
       <div className="projects-page">
-
-        {/* HEADER */}
-        <div className="projects-header">
+        <header className="page-header">
           <div>
-            <div className="page-eyebrow">
-              <i className="bi bi-kanban" />
-              PROJECT MANAGEMENT
+            <div className="eyebrow">
+              WORKSPACE
             </div>
 
-            <h2>Projects</h2>
+            <h1>Projects</h1>
 
-            <p className="muted mb-0">
-              Manage projects, monitor delivery progress,
-              and follow each roadmap from one workspace.
+            <p>
+              Manage projects, track progress, and
+              coordinate delivery.
             </p>
           </div>
 
-          <button
-            type="button"
-            className="btn btn-gold create-project-button"
-            onClick={() => setOpen(true)}
-          >
-            <i className="bi bi-plus-lg me-2" />
-            New project
-          </button>
-        </div>
-
-        {/* SUMMARY */}
-        <div className="row g-3 mb-4">
-
-          <div className="col-6 col-xl-3">
-            <div className="cardx project-stat">
-              <div className="stat-icon">
-                <i className="bi bi-kanban" />
-              </div>
-
-              <div>
-                <span>Total projects</span>
-                <strong>{projectStats.total}</strong>
-              </div>
-            </div>
-          </div>
-
-          <div className="col-6 col-xl-3">
-            <div className="cardx project-stat">
-              <div className="stat-icon active">
-                <i className="bi bi-lightning-charge" />
-              </div>
-
-              <div>
-                <span>Active</span>
-                <strong>{projectStats.active}</strong>
-              </div>
-            </div>
-          </div>
-
-          <div className="col-6 col-xl-3">
-            <div className="cardx project-stat">
-              <div className="stat-icon planned">
-                <i className="bi bi-clock" />
-              </div>
-
-              <div>
-                <span>Planned</span>
-                <strong>{projectStats.planned}</strong>
-              </div>
-            </div>
-          </div>
-
-          <div className="col-6 col-xl-3">
-            <div className="cardx project-stat">
-              <div className="stat-icon completed">
-                <i className="bi bi-check2-circle" />
-              </div>
-
-              <div>
-                <span>Completed</span>
-                <strong>{projectStats.completed}</strong>
-              </div>
-            </div>
-          </div>
-
-        </div>
-
-        {/* WORKSPACE SUMMARY */}
-        <div className="cardx workspace-summary mb-4">
-
-          <div className="workspace-summary-left">
-
-            <div className="workspace-summary-icon">
-              <i className="bi bi-graph-up-arrow" />
-            </div>
-
-            <div>
-              <h5>Workspace progress</h5>
-
-              <p className="muted mb-0">
-                Completion is calculated from the actual
-                project tasks.
-              </p>
-            </div>
-
-          </div>
-
-          <div className="workspace-progress">
-
-            <div className="workspace-progress-top">
-              <span>
-                {projectStats.completedTasks} of{' '}
-                {projectStats.totalTasks} tasks completed
-              </span>
-
-              <strong>
-                {projectStats.overallProgress}%
-              </strong>
-            </div>
-
-            <div className="progress workspace-progress-bar">
-              <div
-                className="progress-bar"
-                style={{
-                  width: `${projectStats.overallProgress}%`,
-                }}
-              />
-            </div>
-
-          </div>
-
-        </div>
-
-        {/* CREATE PROJECT */}
-        {open && (
-          <div className="cardx create-project-card mb-4">
-
-            <div className="create-project-heading">
-
-              <div className="create-project-icon">
-                <i className="bi bi-folder-plus" />
-              </div>
-
-              <div>
-                <h5>Create project</h5>
-
-                <p className="muted mb-0">
-                  Set up the project workspace before
-                  adding tasks and roadmap phases.
-                </p>
-              </div>
-
-            </div>
-
-            <form
-              onSubmit={save}
-              className="row g-3 mt-2"
-            >
-
-              <div className="col-lg-6">
-                <label className="form-label">
-                  Project name
-                </label>
-
-                <input
-                  className="form-control"
-                  placeholder="e.g. DressMe AI"
-                  required
-                  value={name}
-                  onChange={(e) =>
-                    setName(e.target.value)
-                  }
-                />
-              </div>
-
-              <div className="col-lg-3">
-                <label className="form-label">
-                  Project type
-                </label>
-
-                <select
-                  className="form-select"
-                  value={type}
-                  onChange={(e) =>
-                    setType(e.target.value)
-                  }
-                >
-                  <option>Software Project</option>
-                  <option>Data / BI Project</option>
-                  <option>Client Project</option>
-                  <option>Startup Project</option>
-                  <option>Freelance Project</option>
-                  <option>Other</option>
-                </select>
-              </div>
-
-              <div className="col-lg-3">
-                <label className="form-label">
-                  Priority
-                </label>
-
-                <select
-                  className="form-select"
-                  value={priority}
-                  onChange={(e) =>
-                    setPriority(
-                      e.target.value as Project['priority']
-                    )
-                  }
-                >
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="high">High</option>
-                  <option value="critical">
-                    Critical
-                  </option>
-                </select>
-              </div>
-
-              <div className="col-12">
-                <label className="form-label">
-                  Description
-                </label>
-
-                <textarea
-                  className="form-control"
-                  rows={3}
-                  placeholder="Explain the project scope, objective, or expected outcome..."
-                  value={description}
-                  onChange={(e) =>
-                    setDescription(e.target.value)
-                  }
-                />
-              </div>
-
-              <div className="col-12">
-
-                <button
-                  type="submit"
-                  className="btn btn-dark me-2"
-                  disabled={busy}
-                >
-                  {busy ? (
-                    <>
-                      <span
-                        className="spinner-border spinner-border-sm me-2"
-                        aria-hidden="true"
-                      />
-                      Creating...
-                    </>
-                  ) : (
-                    <>
-                      <i className="bi bi-plus-lg me-2" />
-                      Create project
-                    </>
-                  )}
-                </button>
-
+          <div className="header-actions">
+            {profile &&
+              (profile.role === 'admin' ||
+                profile.role === 'developer') && (
                 <button
                   type="button"
-                  className="btn btn-outline-secondary"
-                  onClick={() => setOpen(false)}
-                  disabled={busy}
+                  className="secondary-btn"
+                  onClick={seedUfaaProject}
+                  disabled={seeding}
                 >
-                  Cancel
+                  {seeding
+                    ? 'Seeding UFAA...'
+                    : 'Seed UFAA Power BI'}
                 </button>
+              )}
 
-              </div>
+            <button
+              type="button"
+              className="primary-btn"
+              onClick={() => setOpen(true)}
+            >
+              <span className="plus">+</span>
+              New Project
+            </button>
+          </div>
+        </header>
 
-            </form>
+        {seedMessage && (
+          <div className="seed-message">
+            <div className="seed-message-content">
+              <span className="seed-icon">
+                {seeding ? '⏳' : '✓'}
+              </span>
+
+              <span>{seedMessage}</span>
+            </div>
+
+            {!seeding && (
+              <button
+                type="button"
+                className="seed-close"
+                onClick={() =>
+                  setSeedMessage('')
+                }
+                aria-label="Dismiss"
+              >
+                ×
+              </button>
+            )}
           </div>
         )}
 
-        {/* PROJECTS */}
-        <div className="projects-section">
-
-          <div className="section-heading">
-
-            <div>
-              <h5>Your projects</h5>
-
-              <p className="muted mb-0">
-                Open a project to view its roadmap,
-                tasks, and delivery progress.
-              </p>
-            </div>
-
-            <span className="project-count">
-              {projects.length}{' '}
-              {projects.length === 1
-                ? 'project'
-                : 'projects'}
+        <section className="stats-grid">
+          <div className="stat-card">
+            <span className="stat-label">
+              Total Projects
             </span>
 
+            <strong>{projectStats.total}</strong>
           </div>
 
-          {/* LOADING */}
-          {loading && (
-            <div className="row g-3">
+          <div className="stat-card">
+            <span className="stat-label">
+              Active
+            </span>
 
-              <div className="col-md-6 col-xl-4">
-                <ProjectSkeleton />
-              </div>
+            <strong>
+              {projectStats.active}
+            </strong>
+          </div>
 
-              <div className="col-md-6 col-xl-4">
-                <ProjectSkeleton />
-              </div>
+          <div className="stat-card">
+            <span className="stat-label">
+              Completed
+            </span>
 
-              <div className="col-md-6 col-xl-4">
-                <ProjectSkeleton />
-              </div>
+            <strong>
+              {projectStats.completed}
+            </strong>
+          </div>
 
+          <div className="stat-card">
+            <span className="stat-label">
+              On Hold
+            </span>
+
+            <strong>
+              {projectStats.onHold}
+            </strong>
+          </div>
+        </section>
+
+        <section className="projects-section">
+          <div className="section-header">
+            <div>
+              <h2>Your Projects</h2>
+              <span>
+                {projects.length}{' '}
+                {projects.length === 1
+                  ? 'project'
+                  : 'projects'}
+              </span>
             </div>
-          )}
+          </div>
 
-          {/* PROJECT CARDS */}
-          {!loading && projects.length > 0 && (
-            <div className="row g-3">
-
-              {projects.map((project, index) => {
-
-                const projectTasks =
-                  getTasksForProject(project.id);
-
-                const progress =
-                  getProgress(projectTasks);
-
-                const completedTasks =
-                  projectTasks.filter(
-                    (task) =>
-                      normalizeStatus(task.status) ===
-                      'done'
-                  ).length;
-
-                const inProgressTasks =
-                  projectTasks.filter(
-                    (task) =>
-                      normalizeStatus(task.status) ===
-                      'in-progress'
-                  ).length;
-
-                return (
-                  <div
-                    className="col-md-6 col-xl-4"
-                    key={project.id}
-                  >
-
-                    <Link
-                      href={`/projects/${project.id}`}
-                      className="project-card-link"
-                      title={`Open ${project.name}`}
-                      data-bs-toggle="tooltip"
-                    >
-
-                      <div
-                        className="cardx project-card"
-                        style={{
-                          animationDelay: `${index * 55}ms`,
-                        }}
-                      >
-
-                        {/* CARD TOP */}
-                        <div className="project-card-top">
-
-                          <div className="project-type">
-
-                            <div className="project-folder">
-                              <i className="bi bi-folder2-open" />
-                            </div>
-
-                            <span>
-                              {project.type}
-                            </span>
-
-                          </div>
-
-                          <div
-                            className={`project-status ${getProjectStatusClass(
-                              project.status
-                            )}`}
-                          >
-                            <span />
-
-                            {project.status
-                              .replace('-', ' ')
-                              .replace(/\b\w/g, (char) =>
-                                char.toUpperCase()
-                              )}
-                          </div>
-
-                        </div>
-
-                        {/* TITLE */}
-                        <div className="project-card-title">
-
-                          <h5>{project.name}</h5>
-
-                          <span
-                            className="project-open-icon"
-                            title="Open project"
-                            data-bs-toggle="tooltip"
-                          >
-                            <i className="bi bi-arrow-up-right" />
-                          </span>
-
-                        </div>
-
-                        {/* DESCRIPTION */}
-                        <p className="project-description">
-                          {project.description ||
-                            'No project description yet.'}
-                        </p>
-
-                        {/* PROGRESS */}
-                        <div className="project-progress">
-
-                          <div className="project-progress-top">
-
-                            <span>
-                              Project completion
-                            </span>
-
-                            <strong>
-                              {progress}%
-                            </strong>
-
-                          </div>
-
-                          <div className="progress">
-                            <div
-                              className="progress-bar"
-                              style={{
-                                width: `${progress}%`,
-                              }}
-                            />
-                          </div>
-
-                        </div>
-
-                        {/* TASK SUMMARY */}
-                        <div className="project-task-summary">
-
-                          <div>
-                            <i className="bi bi-list-check" />
-
-                            <span>
-                              {projectTasks.length}{' '}
-                              {projectTasks.length === 1
-                                ? 'task'
-                                : 'tasks'}
-                            </span>
-                          </div>
-
-                          <div>
-                            <i className="bi bi-check2" />
-
-                            <span>
-                              {completedTasks} done
-                            </span>
-                          </div>
-
-                          <div>
-                            <i className="bi bi-arrow-repeat" />
-
-                            <span>
-                              {inProgressTasks} active
-                            </span>
-                          </div>
-
-                        </div>
-
-                        {/* FOOTER */}
-                        <div className="project-card-footer">
-
-                          <div className="project-owner">
-
-                            <div className="owner-avatar">
-                              {project.ownerName
-                                ?.charAt(0)
-                                .toUpperCase() || (
-                                <i className="bi bi-person" />
-                              )}
-                            </div>
-
-                            <span>
-                              {project.ownerName ||
-                                'Project owner'}
-                            </span>
-
-                          </div>
-
-                          <div className="project-priority">
-
-                            <i className="bi bi-flag" />
-
-                            <span className="text-capitalize">
-                              {project.priority}
-                            </span>
-
-                          </div>
-
-                        </div>
-
-                      </div>
-
-                    </Link>
-
-                  </div>
-                );
-              })}
-
+          {loading ? (
+            <div className="empty-state">
+              <div className="spinner" />
+              <p>Loading projects...</p>
             </div>
-          )}
-
-          {/* EMPTY */}
-          {!loading && projects.length === 0 && (
-            <div className="cardx projects-empty">
-
+          ) : projects.length === 0 ? (
+            <div className="empty-state">
               <div className="empty-icon">
-                <i className="bi bi-folder2-open" />
+                ◫
               </div>
 
-              <h5>No projects yet</h5>
+              <h3>No projects yet</h3>
 
-              <p className="muted">
+              <p>
                 Create your first project to start
-                building its roadmap and tracking work.
+                tracking work.
               </p>
 
               <button
                 type="button"
-                className="btn btn-dark"
+                className="primary-btn"
                 onClick={() => setOpen(true)}
               >
-                <i className="bi bi-plus-lg me-2" />
-                Create first project
+                <span className="plus">+</span>
+                New Project
               </button>
+            </div>
+          ) : (
+            <div className="projects-grid">
+              {projects.map((project) => {
+                const progress =
+                  getProgress(
+                    tasks,
+                    project.id,
+                  );
 
+                return (
+                  <Link
+                    key={project.id}
+                    href={`/projects/${project.id}`}
+                    className="project-card"
+                  >
+                    <div className="project-card-top">
+                      <div className="project-icon">
+                        {project.name
+                          .charAt(0)
+                          .toUpperCase()}
+                      </div>
+
+                      <div className="project-card-actions">
+                        <span
+                          className={`status-pill ${getProjectStatusClass(
+                            project.status,
+                          )}`}
+                        >
+                          {normalizeStatus(
+                            project.status,
+                          )
+                            .replace(
+                              '-',
+                              ' ',
+                            )
+                            .replace(
+                              /^\w/,
+                              (c) =>
+                                c.toUpperCase(),
+                            )}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="project-content">
+                      <h3>
+                        {project.name}
+                      </h3>
+
+                      {project.client && (
+                        <div className="client">
+                          {project.client}
+                        </div>
+                      )}
+
+                      <p>
+                        {project.description ||
+                          'No project description provided.'}
+                      </p>
+
+                      <div className="project-meta">
+                        <span
+                          className={`priority ${getPriorityClass(
+                            project.priority,
+                          )}`}
+                        >
+                          {project.priority}
+                        </span>
+
+                        {project.type && (
+                          <span className="type">
+                            {project.type}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="progress-section">
+                        <div className="progress-header">
+                          <span>
+                            Progress
+                          </span>
+
+                          <strong>
+                            {progress}%
+                          </strong>
+                        </div>
+
+                        <div className="progress-track">
+                          <div
+                            className="progress-fill"
+                            style={{
+                              width: `${progress}%`,
+                            }}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="project-footer">
+                        <span>
+                          {tasks.filter(
+                            (task) =>
+                              task.projectId ===
+                              project.id,
+                          ).length}{' '}
+                          tasks
+                        </span>
+
+                        <span>
+                          View project →
+                        </span>
+                      </div>
+                    </div>
+                  </Link>
+                );
+              })}
             </div>
           )}
+        </section>
 
-        </div>
+        {open && (
+          <div
+            className="modal-backdrop"
+            onClick={() => setOpen(false)}
+          >
+            <div
+              className="modal"
+              onClick={(event) =>
+                event.stopPropagation()
+              }
+            >
+              <div className="modal-header">
+                <div>
+                  <div className="eyebrow">
+                    PROJECT
+                  </div>
+
+                  <h2>
+                    Create New Project
+                  </h2>
+                </div>
+
+                <button
+                  type="button"
+                  className="modal-close"
+                  onClick={() =>
+                    setOpen(false)
+                  }
+                >
+                  ×
+                </button>
+              </div>
+
+              <form onSubmit={save}>
+                <div className="form-group">
+                  <label htmlFor="project-name">
+                    Project Name
+                  </label>
+
+                  <input
+                    id="project-name"
+                    type="text"
+                    value={name}
+                    onChange={(event) =>
+                      setName(
+                        event.target.value,
+                      )
+                    }
+                    placeholder="Enter project name"
+                    required
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="project-description">
+                    Description
+                  </label>
+
+                  <textarea
+                    id="project-description"
+                    value={description}
+                    onChange={(event) =>
+                      setDescription(
+                        event.target.value,
+                      )
+                    }
+                    placeholder="Describe the project"
+                    rows={4}
+                  />
+                </div>
+
+                <div className="form-row">
+                  <div className="form-group">
+                    <label htmlFor="project-type">
+                      Project Type
+                    </label>
+
+                    <select
+                      id="project-type"
+                      value={type}
+                      onChange={(event) =>
+                        setType(
+                          event.target.value,
+                        )
+                      }
+                    >
+                      <option>
+                        Software Project
+                      </option>
+
+                      <option>
+                        Data / BI Project
+                      </option>
+
+                      <option>
+                        Mobile App
+                      </option>
+
+                      <option>
+                        Web Application
+                      </option>
+
+                      <option>
+                        Infrastructure
+                      </option>
+
+                      <option>
+                        Other
+                      </option>
+                    </select>
+                  </div>
+
+                  <div className="form-group">
+                    <label htmlFor="project-priority">
+                      Priority
+                    </label>
+
+                    <select
+                      id="project-priority"
+                      value={priority}
+                      onChange={(event) =>
+                        setPriority(
+                          event.target
+                            .value as Project['priority'],
+                        )
+                      }
+                    >
+                      <option value="low">
+                        Low
+                      </option>
+
+                      <option value="medium">
+                        Medium
+                      </option>
+
+                      <option value="high">
+                        High
+                      </option>
+
+                      <option value="critical">
+                        Critical
+                      </option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="modal-actions">
+                  <button
+                    type="button"
+                    className="cancel-btn"
+                    onClick={() =>
+                      setOpen(false)
+                    }
+                    disabled={busy}
+                  >
+                    Cancel
+                  </button>
+
+                  <button
+                    type="submit"
+                    className="primary-btn"
+                    disabled={
+                      busy || !name.trim()
+                    }
+                  >
+                    {busy
+                      ? 'Creating...'
+                      : 'Create Project'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
       </div>
 
       <style jsx>{`
         .projects-page {
-          animation: pageIn 0.45s ease both;
+          padding: 32px;
+          max-width: 1440px;
+          margin: 0 auto;
         }
 
-        .projects-header {
+        .page-header {
           display: flex;
           align-items: flex-end;
           justify-content: space-between;
@@ -731,659 +810,577 @@ export default function Projects() {
           margin-bottom: 28px;
         }
 
-        .page-eyebrow {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          margin-bottom: 8px;
-          color: #8b8b8b;
+        .eyebrow {
           font-size: 11px;
           font-weight: 700;
-          letter-spacing: 0.12em;
+          letter-spacing: 0.14em;
+          color: #8a8278;
+          margin-bottom: 7px;
         }
 
-        .projects-header h2 {
+        .page-header h1 {
           margin: 0;
+          font-size: 32px;
+          line-height: 1.15;
+          color: #1a1a1a;
           font-weight: 700;
-          letter-spacing: -0.035em;
         }
 
-        .projects-header p {
-          margin-top: 7px;
-          max-width: 650px;
+        .page-header p {
+          margin: 8px 0 0;
+          color: #77716a;
+          font-size: 14px;
+        }
+
+        .header-actions {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+
+        button {
+          font-family: inherit;
+        }
+
+        .primary-btn,
+        .secondary-btn {
+          border: 0;
+          border-radius: 9px;
+          padding: 11px 17px;
+          font-size: 13px;
+          font-weight: 700;
+          cursor: pointer;
+          transition:
+            transform 0.15s ease,
+            opacity 0.15s ease;
+        }
+
+        .primary-btn {
+          background: #1a1a1a;
+          color: #fff;
+        }
+
+        .secondary-btn {
+          background: #f5f0e8;
+          color: #1a1a1a;
+          border: 1px solid #e4ddd2;
+        }
+
+        .primary-btn:hover:not(:disabled),
+        .secondary-btn:hover:not(:disabled) {
+          transform: translateY(-1px);
+        }
+
+        .primary-btn:disabled,
+        .secondary-btn:disabled {
+          opacity: 0.55;
+          cursor: not-allowed;
+        }
+
+        .plus {
+          font-size: 18px;
+          margin-right: 5px;
+          vertical-align: -1px;
+        }
+
+        .seed-message {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 16px;
+          margin-bottom: 24px;
+          padding: 13px 16px;
+          border: 1px solid #e4ddd2;
+          border-radius: 10px;
+          background: #f5f0e8;
+          color: #4f4a44;
           font-size: 13px;
         }
 
-        .create-project-button {
-          flex: 0 0 auto;
-        }
-
-        .project-stat {
-          min-height: 92px;
+        .seed-message-content {
           display: flex;
           align-items: center;
-          gap: 14px;
-          animation: cardIn 0.45s ease both;
-          transition:
-            transform 0.2s ease,
-            box-shadow 0.2s ease;
+          gap: 9px;
         }
 
-        .project-stat:hover {
-          transform: translateY(-2px);
-          box-shadow: 0 12px 28px rgba(0, 0, 0, 0.06);
+        .seed-icon {
+          font-size: 15px;
         }
 
-        .stat-icon {
-          width: 42px;
-          height: 42px;
-          display: grid;
-          place-items: center;
-          border-radius: 12px;
-          background: #f5f0e8;
-          color: #9b7b42;
-          font-size: 18px;
-        }
-
-        .stat-icon.active {
-          background: #f6f0e4;
-          color: #9b7b42;
-        }
-
-        .stat-icon.planned {
-          background: #f1f1ef;
-          color: #777;
-        }
-
-        .stat-icon.completed {
-          background: #eaf0eb;
-          color: #68816d;
-        }
-
-        .project-stat span {
-          display: block;
-          color: #888;
-          font-size: 11px;
-          margin-bottom: 3px;
-        }
-
-        .project-stat strong {
-          display: block;
-          font-size: 24px;
+        .seed-close {
+          border: 0;
+          background: transparent;
+          color: #77716a;
+          font-size: 20px;
+          cursor: pointer;
           line-height: 1;
         }
 
-        .workspace-summary {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 30px;
-          animation: cardIn 0.5s ease both;
-        }
-
-        .workspace-summary-left {
-          display: flex;
-          align-items: center;
-          gap: 13px;
-          min-width: 230px;
-        }
-
-        .workspace-summary-icon {
-          width: 42px;
-          height: 42px;
+        .stats-grid {
           display: grid;
-          place-items: center;
-          border-radius: 11px;
-          background: #f5f0e8;
-          color: #9b7b42;
+          grid-template-columns: repeat(4, 1fr);
+          gap: 14px;
+          margin-bottom: 32px;
         }
 
-        .workspace-summary h5 {
-          margin: 0;
-          font-weight: 650;
+        .stat-card {
+          background: #fff;
+          border: 1px solid #ebe6df;
+          border-radius: 12px;
+          padding: 18px 20px;
         }
 
-        .workspace-summary p {
-          margin-top: 3px;
-          font-size: 10px;
-        }
-
-        .workspace-progress {
-          flex: 1;
-          max-width: 520px;
-        }
-
-        .workspace-progress-top {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 7px;
-          color: #888;
-          font-size: 10px;
-        }
-
-        .workspace-progress-top strong {
-          color: #9b7b42;
-          font-size: 13px;
-        }
-
-        .workspace-progress-bar {
-          height: 7px;
-          overflow: hidden;
-          border-radius: 10px;
-          background: #efeeeb;
-        }
-
-        .workspace-progress-bar .progress-bar {
-          background: #c8a96e;
-          border-radius: inherit;
-          transition: width 0.8s ease;
-        }
-
-        .create-project-card {
-          animation: panelIn 0.35s ease both;
-        }
-
-        .create-project-heading {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-        }
-
-        .create-project-icon {
-          width: 42px;
-          height: 42px;
-          display: grid;
-          place-items: center;
-          border-radius: 11px;
-          background: #f5f0e8;
-          color: #9b7b42;
-        }
-
-        .create-project-heading h5 {
-          margin: 0;
-          font-weight: 650;
-        }
-
-        .create-project-heading p {
-          margin-top: 3px;
-          font-size: 11px;
-        }
-
-        .form-label {
-          margin-bottom: 6px;
-          font-size: 11px;
-          font-weight: 650;
-        }
-
-        .section-heading {
-          display: flex;
-          align-items: flex-end;
-          justify-content: space-between;
-          gap: 20px;
-          margin-bottom: 15px;
-        }
-
-        .section-heading h5 {
-          margin: 0;
-          font-weight: 650;
-        }
-
-        .section-heading p {
-          margin-top: 3px;
-          font-size: 10px;
-        }
-
-        .project-count {
-          color: #999;
-          font-size: 10px;
-          white-space: nowrap;
-        }
-
-        .project-card-link {
+        .stat-label {
           display: block;
-          height: 100%;
-          color: inherit;
-          text-decoration: none;
+          color: #817a72;
+          font-size: 12px;
+          margin-bottom: 7px;
+        }
+
+        .stat-card strong {
+          display: block;
+          color: #1a1a1a;
+          font-size: 26px;
+          line-height: 1;
+        }
+
+        .projects-section {
+          margin-top: 8px;
+        }
+
+        .section-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          margin-bottom: 16px;
+        }
+
+        .section-header h2 {
+          margin: 0 0 4px;
+          color: #1a1a1a;
+          font-size: 20px;
+        }
+
+        .section-header span {
+          color: #8a8278;
+          font-size: 12px;
+        }
+
+        .projects-grid {
+          display: grid;
+          grid-template-columns: repeat(
+            3,
+            minmax(0, 1fr)
+          );
+          gap: 18px;
         }
 
         .project-card {
-          height: 100%;
-          min-height: 305px;
-          display: flex;
-          flex-direction: column;
-          padding: 20px;
-          animation: projectIn 0.45s ease both;
+          display: block;
+          text-decoration: none;
+          color: inherit;
+          background: #fff;
+          border: 1px solid #ebe6df;
+          border-radius: 14px;
+          overflow: hidden;
           transition:
-            transform 0.22s ease,
-            box-shadow 0.22s ease,
-            border-color 0.22s ease;
+            transform 0.18s ease,
+            box-shadow 0.18s ease,
+            border-color 0.18s ease;
         }
 
         .project-card:hover {
-          transform: translateY(-4px);
-          box-shadow: 0 18px 38px rgba(0, 0, 0, 0.075);
-          border-color: rgba(200, 169, 110, 0.3);
+          transform: translateY(-2px);
+          box-shadow: 0 10px 30px rgba(
+            30,
+            25,
+            20,
+            0.07
+          );
+          border-color: #ddd4c8;
         }
 
         .project-card-top {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          gap: 10px;
-          margin-bottom: 18px;
+          padding: 18px 18px 0;
         }
 
-        .project-type {
+        .project-icon {
+          width: 42px;
+          height: 42px;
+          border-radius: 10px;
+          background: #f5f0e8;
           display: flex;
           align-items: center;
-          gap: 8px;
-          color: #898989;
-          font-size: 9px;
+          justify-content: center;
+          font-size: 17px;
+          font-weight: 700;
+          color: #5f5549;
+        }
+
+        .status-pill {
+          display: inline-flex;
+          align-items: center;
+          border-radius: 999px;
+          padding: 5px 9px;
+          font-size: 11px;
+          font-weight: 700;
+        }
+
+        .status-active {
+          background: #e9f5ed;
+          color: #2f6f45;
+        }
+
+        .status-completed {
+          background: #eaf0f8;
+          color: #496580;
+        }
+
+        .status-on-hold {
+          background: #f8f0df;
+          color: #856c38;
+        }
+
+        .status-planned {
+          background: #f1efed;
+          color: #6d6761;
+        }
+
+        .project-content {
+          padding: 17px 18px 18px;
+        }
+
+        .project-content h3 {
+          margin: 0;
+          color: #1a1a1a;
+          font-size: 17px;
+          line-height: 1.35;
+        }
+
+        .client {
+          margin-top: 5px;
+          color: #9a9188;
+          font-size: 11px;
           font-weight: 600;
         }
 
-        .project-folder {
-          width: 28px;
-          height: 28px;
-          display: grid;
-          place-items: center;
-          border-radius: 8px;
-          background: #f5f0e8;
-          color: #9b7b42;
+        .project-content > p {
+          margin: 10px 0 14px;
+          color: #77716a;
           font-size: 13px;
-        }
-
-        .project-status {
-          display: flex;
-          align-items: center;
-          gap: 5px;
-          padding: 5px 7px;
-          border-radius: 6px;
-          font-size: 8px;
-          font-weight: 650;
-          text-transform: capitalize;
-        }
-
-        .project-status > span {
-          width: 5px;
-          height: 5px;
-          border-radius: 50%;
-        }
-
-        .project-planned {
-          background: #f1f1ef;
-          color: #777;
-        }
-
-        .project-planned > span {
-          background: #999;
-        }
-
-        .project-active {
-          background: #f6f0e4;
-          color: #8d7344;
-        }
-
-        .project-active > span {
-          background: #c8a96e;
-          animation: pulse 2s infinite;
-        }
-
-        .project-hold {
-          background: #f5e8e5;
-          color: #8c625b;
-        }
-
-        .project-hold > span {
-          background: #9a6d65;
-        }
-
-        .project-completed {
-          background: #eaf0eb;
-          color: #66806c;
-        }
-
-        .project-completed > span {
-          background: #718875;
-        }
-
-        .project-card-title {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 12px;
-        }
-
-        .project-card-title h5 {
-          margin: 0;
-          color: #252525;
-          font-size: 16px;
-          font-weight: 700;
-          letter-spacing: -0.025em;
-        }
-
-        .project-open-icon {
-          width: 29px;
-          height: 29px;
-          display: grid;
-          place-items: center;
-          flex: 0 0 auto;
-          border: 1px solid rgba(0, 0, 0, 0.07);
-          border-radius: 8px;
-          color: #888;
-          background: #fff;
-          transition: all 0.2s ease;
-        }
-
-        .project-card:hover .project-open-icon {
-          background: #f5f0e8;
-          color: #9b7b42;
-          transform: translate(1px, -1px);
-        }
-
-        .project-description {
-          min-height: 34px;
-          margin: 8px 0 20px;
-          color: #8b8b8b;
-          font-size: 10px;
-          line-height: 1.65;
+          line-height: 1.55;
           display: -webkit-box;
-          -webkit-line-clamp: 2;
+          -webkit-line-clamp: 3;
           -webkit-box-orient: vertical;
           overflow: hidden;
         }
 
-        .project-progress {
+        .project-meta {
+          display: flex;
+          align-items: center;
+          gap: 8px;
           margin-bottom: 17px;
         }
 
-        .project-progress-top {
+        .priority,
+        .type {
+          display: inline-flex;
+          align-items: center;
+          border-radius: 999px;
+          padding: 5px 8px;
+          font-size: 10px;
+          font-weight: 700;
+          text-transform: capitalize;
+        }
+
+        .priority-high {
+          background: #f7ebe5;
+          color: #92563e;
+        }
+
+        .priority-medium {
+          background: #f5f0e8;
+          color: #806b51;
+        }
+
+        .priority-low {
+          background: #eef1ed;
+          color: #647363;
+        }
+
+        .priority-critical {
+          background: #f3e4e4;
+          color: #963f3f;
+        }
+
+        .type {
+          background: #f4f2ef;
+          color: #756f68;
+        }
+
+        .progress-section {
+          margin-top: 4px;
+        }
+
+        .progress-header {
           display: flex;
           align-items: center;
           justify-content: space-between;
           margin-bottom: 7px;
-          color: #999;
-          font-size: 9px;
+          color: #8a8278;
+          font-size: 11px;
         }
 
-        .project-progress-top strong {
-          color: #9b7b42;
-          font-size: 10px;
+        .progress-header strong {
+          color: #514b45;
         }
 
-        .project-progress .progress {
+        .progress-track {
           height: 6px;
-          border-radius: 10px;
-          background: #efeeeb;
+          border-radius: 999px;
+          background: #eeeae5;
           overflow: hidden;
         }
 
-        .project-progress .progress-bar {
+        .progress-fill {
+          height: 100%;
           border-radius: inherit;
           background: #c8a96e;
-          transition: width 0.8s ease;
+          transition: width 0.25s ease;
         }
 
-        .project-task-summary {
+        .project-footer {
           display: flex;
-          align-items: center;
-          flex-wrap: wrap;
-          gap: 10px;
-          padding-bottom: 17px;
-          border-bottom: 1px solid rgba(0, 0, 0, 0.055);
-          color: #8d8d8d;
-          font-size: 8px;
-        }
-
-        .project-task-summary div {
-          display: inline-flex;
-          align-items: center;
-          gap: 4px;
-        }
-
-        .project-task-summary i {
-          font-size: 9px;
-        }
-
-        .project-card-footer {
-          display: flex;
-          align-items: center;
           justify-content: space-between;
           gap: 10px;
-          margin-top: auto;
-          padding-top: 15px;
+          margin-top: 17px;
+          padding-top: 13px;
+          border-top: 1px solid #f0ece7;
+          color: #8a8278;
+          font-size: 11px;
         }
 
-        .project-owner {
-          display: flex;
-          align-items: center;
-          gap: 7px;
-          min-width: 0;
-        }
-
-        .owner-avatar {
-          width: 25px;
-          height: 25px;
-          display: grid;
-          place-items: center;
-          flex: 0 0 25px;
-          border-radius: 50%;
-          background: #f5f0e8;
-          color: #8d7344;
-          font-size: 9px;
+        .project-footer span:last-child {
+          color: #514b45;
           font-weight: 700;
         }
 
-        .project-owner span:last-child {
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-          color: #777;
-          font-size: 9px;
-        }
-
-        .project-priority {
+        .empty-state {
+          min-height: 330px;
+          border: 1px dashed #ddd6ce;
+          border-radius: 14px;
           display: flex;
+          flex-direction: column;
           align-items: center;
-          gap: 5px;
-          color: #999;
-          font-size: 9px;
-        }
-
-        .project-priority i {
-          font-size: 9px;
-        }
-
-        .projects-empty {
-          padding: 70px 20px;
+          justify-content: center;
           text-align: center;
-          animation: pageIn 0.4s ease both;
+          padding: 30px;
         }
 
         .empty-icon {
           width: 52px;
           height: 52px;
-          display: grid;
-          place-items: center;
-          margin: 0 auto 15px;
-          border-radius: 14px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          border-radius: 13px;
           background: #f5f0e8;
-          color: #9b7b42;
-          font-size: 21px;
+          color: #756a5d;
+          font-size: 23px;
+          margin-bottom: 14px;
         }
 
-        .projects-empty h5 {
-          margin-bottom: 6px;
+        .empty-state h3 {
+          margin: 0;
+          color: #1a1a1a;
+          font-size: 17px;
         }
 
-        .projects-empty p {
-          max-width: 430px;
-          margin: 0 auto 18px;
-          font-size: 11px;
+        .empty-state p {
+          margin: 7px 0 18px;
+          color: #817a72;
+          font-size: 13px;
         }
 
-        .project-skeleton {
-          min-height: 305px;
+        .spinner {
+          width: 24px;
+          height: 24px;
+          border: 3px solid #e7e1d9;
+          border-top-color: #756a5d;
+          border-radius: 50%;
+          animation: spin 0.8s linear infinite;
+          margin-bottom: 13px;
+        }
+
+        @keyframes spin {
+          to {
+            transform: rotate(360deg);
+          }
+        }
+
+        .modal-backdrop {
+          position: fixed;
+          inset: 0;
+          z-index: 1000;
+          display: flex;
+          align-items: center;
+          justify-content: center;
           padding: 20px;
-          border: 1px solid rgba(0, 0, 0, 0.055);
-          border-radius: 14px;
+          background: rgba(20, 18, 16, 0.48);
+        }
+
+        .modal {
+          width: min(560px, 100%);
+          max-height: calc(100vh - 40px);
+          overflow-y: auto;
           background: #fff;
-          overflow: hidden;
-        }
-
-        .skeleton {
-          border-radius: 6px;
-          background: linear-gradient(
-            90deg,
-            #f0efec,
-            #faf9f6,
-            #f0efec
+          border-radius: 16px;
+          box-shadow: 0 25px 70px rgba(
+            0,
+            0,
+            0,
+            0.18
           );
-          background-size: 200% 100%;
-          animation: skeleton 1.5s infinite;
+          padding: 24px;
         }
 
-        .skeleton-small {
-          width: 30%;
-          height: 26px;
-          margin-bottom: 25px;
+        .modal-header {
+          display: flex;
+          justify-content: space-between;
+          gap: 20px;
+          margin-bottom: 24px;
         }
 
-        .skeleton-heading {
-          width: 65%;
-          height: 17px;
-          margin-bottom: 12px;
+        .modal-header h2 {
+          margin: 0;
+          font-size: 21px;
+          color: #1a1a1a;
         }
 
-        .skeleton-line {
-          width: 90%;
-          height: 8px;
-          margin-bottom: 8px;
+        .modal-close {
+          width: 34px;
+          height: 34px;
+          border: 0;
+          border-radius: 8px;
+          background: #f4f1ed;
+          color: #5d5751;
+          font-size: 22px;
+          cursor: pointer;
         }
 
-        .skeleton-line.short {
-          width: 65%;
-          margin-bottom: 28px;
+        .form-group {
+          margin-bottom: 17px;
         }
 
-        .skeleton-progress {
+        .form-group label {
+          display: block;
+          margin-bottom: 7px;
+          color: #4d4842;
+          font-size: 12px;
+          font-weight: 700;
+        }
+
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
           width: 100%;
-          height: 6px;
+          box-sizing: border-box;
+          border: 1px solid #ded8d0;
+          border-radius: 9px;
+          background: #fff;
+          color: #1a1a1a;
+          font-family: inherit;
+          font-size: 13px;
+          padding: 11px 12px;
+          outline: none;
         }
 
-        @keyframes pageIn {
-          from {
-            opacity: 0;
-            transform: translateY(8px);
-          }
-
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
+        .form-group textarea {
+          resize: vertical;
         }
 
-        @keyframes cardIn {
-          from {
-            opacity: 0;
-            transform: translateY(7px);
-          }
-
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
+        .form-group input:focus,
+        .form-group textarea:focus,
+        .form-group select:focus {
+          border-color: #b9a98f;
+          box-shadow: 0 0 0 3px
+            rgba(200, 169, 110, 0.12);
         }
 
-        @keyframes projectIn {
-          from {
-            opacity: 0;
-            transform: translateY(10px);
-          }
-
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
+        .form-row {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 14px;
         }
 
-        @keyframes panelIn {
-          from {
-            opacity: 0;
-            transform: translateY(-5px);
-          }
-
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
+        .modal-actions {
+          display: flex;
+          justify-content: flex-end;
+          gap: 10px;
+          margin-top: 23px;
+          padding-top: 18px;
+          border-top: 1px solid #eee9e3;
         }
 
-        @keyframes pulse {
-          0%,
-          100% {
-            box-shadow: 0 0 0 0 rgba(200, 169, 110, 0.25);
-          }
+        .cancel-btn {
+          border: 1px solid #ded8d0;
+          border-radius: 9px;
+          background: #fff;
+          color: #5e5851;
+          padding: 11px 16px;
+          font-size: 13px;
+          font-weight: 700;
+          cursor: pointer;
+        }
 
-          50% {
-            box-shadow: 0 0 0 5px rgba(200, 169, 110, 0);
+        @media (max-width: 1100px) {
+          .projects-grid {
+            grid-template-columns: repeat(
+              2,
+              minmax(0, 1fr)
+            );
           }
         }
 
-        @keyframes skeleton {
-          0% {
-            background-position: 200% 0;
+        @media (max-width: 800px) {
+          .projects-page {
+            padding: 22px 16px;
           }
 
-          100% {
-            background-position: -200% 0;
-          }
-        }
-
-        @media (max-width: 850px) {
-          .projects-header {
+          .page-header {
             align-items: flex-start;
             flex-direction: column;
           }
 
-          .create-project-button {
+          .stats-grid {
+            grid-template-columns: repeat(2, 1fr);
+          }
+
+          .projects-grid {
+            grid-template-columns: 1fr;
+          }
+        }
+
+        @media (max-width: 520px) {
+          .header-actions {
             width: 100%;
           }
 
-          .workspace-summary {
-            align-items: flex-start;
-            flex-direction: column;
+          .header-actions button {
+            flex: 1;
           }
 
-          .workspace-progress {
-            width: 100%;
-            max-width: none;
-          }
-        }
-
-        @media (max-width: 600px) {
-          .section-heading {
-            align-items: flex-start;
-            flex-direction: column;
+          .form-row {
+            grid-template-columns: 1fr;
+            gap: 0;
           }
 
-          .project-card {
-            min-height: 290px;
-          }
-        }
-
-        @media (prefers-reduced-motion: reduce) {
-          .projects-page,
-          .project-stat,
-          .workspace-summary,
-          .create-project-card,
-          .project-card,
-          .projects-empty,
-          .project-status > span,
-          .skeleton {
-            animation: none !important;
-            transition: none !important;
+          .stats-grid {
+            grid-template-columns: 1fr 1fr;
           }
         }
       `}</style>
